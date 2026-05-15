@@ -1,12 +1,16 @@
 // src/wallet/wallet.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
 
 @Injectable()
 export class WalletService {
   private readonly logger = new Logger(WalletService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private mailService: MailService,
+  ) {}
 
   async getBalance(userId: string): Promise<{ balance: number }> {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
@@ -159,5 +163,55 @@ export class WalletService {
   },
 });
     return { success: true, balance: wallet.balance };
+  }
+
+  // ── GESTION DES CARTES ─────────────────────────────────────────────────────
+  async saveCard(userId: string, stripeMethodId: string) {
+    try {
+      const stripeKey = process.env.STRIPE_SECRET_KEY;
+      if (!stripeKey) throw new Error('Stripe not configured');
+      const stripe = require('stripe')(stripeKey);
+
+      // 1. Récupérer les détails de la carte via Stripe
+      const method = await stripe.paymentMethods.retrieve(stripeMethodId);
+      const card = method.card;
+
+      // 2. Enregistrer dans la DB
+      const savedCard = await this.prisma.savedCard.create({
+        data: {
+          userId,
+          stripeMethodId,
+          brand: card.brand,
+          last4: card.last4,
+          expMonth: card.exp_month,
+          expYear: card.exp_year,
+          isDefault: true, // Par défaut la nouvelle carte devient la principale
+        },
+      });
+
+      // 3. Envoyer l'email
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (user && user.email) {
+        await this.mailService.sendCardRegistered(user.email, card.brand, card.last4, user.language);
+      }
+
+      return savedCard;
+    } catch (e) {
+      this.logger.error('Error saving card:', e);
+      throw e;
+    }
+  }
+
+  async listCards(userId: string) {
+    return this.prisma.savedCard.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async deleteCard(userId: string, cardId: string) {
+    return this.prisma.savedCard.delete({
+      where: { id: cardId, userId },
+    });
   }
 }

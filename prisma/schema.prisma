@@ -177,8 +177,25 @@ model User {
   transactions       Transaction[]
   documents          Document[]
   savedPlaces        SavedPlace[]
+  savedCards         SavedCard[]
 
   @@map("users")
+}
+
+model SavedCard {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeMethodId  String   @unique
+  brand           String?
+  last4           String?
+  expMonth        Int?
+  expYear         Int?
+  isDefault       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@map("saved_cards")
 }
 
 model DriverProfile {
@@ -349,7 +366,7 @@ model Payment {
   userId        String
   user          User          @relation(fields: [userId], references: [id])
   amount        Float
-  currency      String        @default("XOF")
+  currency      String        @default("EUR")
   method        PaymentMethod
   status        PaymentStatus @default(PENDING)
   externalRef   String?

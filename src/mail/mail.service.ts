@@ -69,7 +69,17 @@ export class MailService {
 
   async sendPaymentConfirmation(email: string, amount: number, language = 'fr') {
     const subject = 'Confirmation de paiement';
-    const html = `<h1>Paiement de ${amount} XOF confirmé</h1>`;
+    const html = `<h1>Paiement de ${amount} € confirmé</h1>`;
+    await this.sendEmail(email, subject, html);
+  }
+
+  async sendCardRegistered(email: string, brand: string, last4: string, language = 'fr') {
+    const subject = language === 'fr' ? 'Nouvelle carte enregistrée' : 'New payment method added';
+    const html = `
+      <h1>Carte enregistrée avec succès</h1>
+      <p>Une nouvelle carte <strong>${brand}</strong> se terminant par <strong>${last4}</strong> a été ajoutée à votre compte Koogwe.</p>
+      <p>Si vous n'êtes pas à l'origine de cette action, veuillez contacter le support immédiatement.</p>
+    `;
     await this.sendEmail(email, subject, html);
   }
 
