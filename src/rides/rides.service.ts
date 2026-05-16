@@ -72,6 +72,11 @@ export class RidesService {
 
   // ─── PASSAGER : Créer une course ──────────────────────────────────────────
   async createRide(passengerId: string, data: any) {
+    // Validation basique des entrées
+    if (isNaN(data.pickupLat) || isNaN(data.pickupLng) || isNaN(data.dropoffLat) || isNaN(data.dropoffLng)) {
+      throw new BadRequestException('Coordonnées GPS invalides');
+    }
+
     // ✅ FIX : Le prix est calculé côté serveur, pas côté client
     // Si Mapbox renvoie distance/durée depuis le front, on les utilise
     // Sinon on estime à partir de la distance Haversine

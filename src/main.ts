@@ -3,12 +3,16 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import helmet from 'helmet';
 import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
+
+  // ─── Filtre global d'exceptions ───────────────────────────────────────────
+  app.useGlobalFilters(new AllExceptionsFilter());
 
   // ─── Limite taille payload (fix erreur 413) ───────────────────────────────
   app.use(bodyParser.json({ limit: '20mb' }));

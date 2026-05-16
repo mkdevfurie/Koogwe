@@ -208,14 +208,17 @@ export class AuthService {
     });
 
     if (!user) {
+      this.logger.warn(`Tentative de connexion admin échouée : utilisateur ${normalizedEmail} non trouvé`);
       throw new UnauthorizedException('Identifiants invalides');
     }
 
     if (user.role !== 'ADMIN') {
+      this.logger.warn(`Tentative de connexion admin rejetée : ${normalizedEmail} n'est pas ADMIN (rôle: ${user.role})`);
       throw new UnauthorizedException('Accès réservé aux administrateurs');
     }
 
     if (!user.isActive) {
+      this.logger.warn(`Tentative de connexion admin rejetée : ${normalizedEmail} est désactivé`);
       throw new UnauthorizedException('Ce compte est désactivé');
     }
 
@@ -227,6 +230,7 @@ export class AuthService {
     const passwordValid = await bcrypt.compare(password, user.hashedPassword);
 
     if (!passwordValid) {
+      this.logger.warn(`Tentative de connexion admin échouée : mot de passe incorrect pour ${normalizedEmail}`);
       throw new UnauthorizedException('Identifiants invalides');
     }
 

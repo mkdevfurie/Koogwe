@@ -70,10 +70,21 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Renouvelle les tokens JWT via le refresh token' })
   async refresh(@Body() dto: RefreshTokenDto) {
-    const payload = JSON.parse(
-      Buffer.from(dto.refreshToken.split('.')[1], 'base64').toString(),
-    );
-    return this.authService.refreshTokens(payload.sub, dto.refreshToken);
+    try {
+      if (!dto.refreshToken || !dto.refreshToken.includes('.')) {
+        throw new BadRequestException('Refresh token invalide');
+      }
+      const payload = JSON.parse(
+        Buffer.from(dto.refreshToken.split('.')[1], 'base64').toString(),
+      );
+      if (!payload || !payload.sub) {
+        throw new BadRequestException('Payload du refresh token invalide');
+      }
+      return this.authService.refreshTokens(payload.sub, dto.refreshToken);
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new UnauthorizedException('Session expirée ou token invalide');
+    }
   }
 
   @Post('logout')

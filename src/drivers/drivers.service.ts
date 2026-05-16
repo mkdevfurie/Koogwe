@@ -2,6 +2,7 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { parseDocType } from '../common/utils';
 import { IsString, IsOptional, IsEnum, IsInt, IsNumber } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { VehicleType } from '@prisma/client';
@@ -91,12 +92,24 @@ export class DriversService {
   }
 
   async uploadDocument(userId: string, type: string, fileUrl: string) {
-    const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
-    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+    try {
+      const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
+      if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
 
-    return this.prisma.document.create({
-      data: { userId, type: type as any, fileUrl, status: 'PENDING' },
-    });
+      const docType = parseDocType(type);
+
+      return await this.prisma.document.create({
+        data: { 
+          userId, 
+          type: docType, 
+          fileUrl, 
+          status: 'PENDING' 
+        },
+      });
+    } catch (error) {
+      this.logger.error(`Erreur upload document (${type}) pour l'utilisateur ${userId}:`, error);
+      throw error;
+    }
   }
 
   async getRideHistory(userId: string, page = 1, limit = 10) {

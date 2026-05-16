@@ -3,6 +3,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { DocumentStatus, DocumentType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { parseDocType } from '../common/utils';
 
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
   DocumentType.ID_CARD_FRONT,
@@ -17,31 +18,8 @@ const REQUIRED_DRIVER_DOCS: DocumentType[] = [
 export class DocumentsService {
   constructor(
     private prisma: PrismaService,
-    private cloudinaryService: CloudinaryService,   // ← Injection Cloudinary
+    private cloudinaryService: CloudinaryService,
   ) {}
-
-  private parseDocType(type: string): DocumentType {
-    // Mapping des types envoyés par Flutter vers les types Prisma
-    const TYPE_MAP: Record<string, DocumentType> = {
-      license:           DocumentType.DRIVERS_LICENSE,
-      drivers_license:   DocumentType.DRIVERS_LICENSE,
-      gray_card:         DocumentType.VEHICLE_REGISTRATION,
-      vehicle_registration: DocumentType.VEHICLE_REGISTRATION,
-      insurance:         DocumentType.INSURANCE,
-      technical_control: DocumentType.TECHNICAL_CONTROL,
-      id_card_front:     DocumentType.ID_CARD_FRONT,
-      id_card_back:      DocumentType.ID_CARD_BACK,
-      selfie_with_id:    DocumentType.SELFIE_WITH_ID,
-    };
-
-    const normalized = (type || '').toLowerCase().trim();
-    if (TYPE_MAP[normalized]) return TYPE_MAP[normalized];
-
-    // Fallback: essai direct avec la valeur uppercase
-    const val = (DocumentType as any)[(type || '').toUpperCase()];
-    if (!val) throw new BadRequestException(`Type de document invalide: ${type}`);
-    return val;
-  }
 
   private toDocStatus(status?: string, approved?: boolean): DocumentStatus {
     if (typeof approved === 'boolean') 
@@ -73,7 +51,7 @@ export class DocumentsService {
     if (!imageBase64 || imageBase64.length < 100) 
       throw new BadRequestException('Image invalide');
 
-    const docType = this.parseDocType(type);
+    const docType = parseDocType(type);
 
     // Vérification taille (8MB max)
     const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
@@ -107,8 +85,8 @@ export class DocumentsService {
         data: {
           userId,
           type: docType,
-          fileUrl: uploadResult.url,           // URL Cloudinary
-          publicId: uploadResult.publicId,     // Important pour suppression future
+          fileUrl: uploadResult.url,
+          publicId: uploadResult.publicId,
           status: DocumentStatus.PENDING,
         },
       });
@@ -139,12 +117,10 @@ export class DocumentsService {
     };
   }
 
-  // === Méthodes d'administration (inchangées sauf mapDoc simplifié) ===
-
   private mapDoc<T extends { fileUrl: string; publicId?: string; user?: any }>(doc: T) {
     return {
       ...doc,
-      url: doc.fileUrl,                    // Cloudinary renvoie déjà une URL complète
+      url: doc.fileUrl,
       uploaderName: doc.user?.firstName || doc.user?.email || 'Inconnu',
       uploaderEmail: doc.user?.email ?? null,
       uploaderId: doc.user?.id ?? null,
@@ -221,7 +197,6 @@ export class DocumentsService {
     };
   }
 
-  // Validation finale du chauffeur (très stricte comme tu le souhaites)
   async decideDriverAccount(params: { 
     driverId: string; 
     adminId: string; 
