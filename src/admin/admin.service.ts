@@ -1,14 +1,46 @@
 // src/admin/admin.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { DocumentStatus, DocumentType } from '@prisma/client';
+
+// Documents requis pour qu'un chauffeur soit auto-activé après approbation
+const REQUIRED_DRIVER_DOCS: DocumentType[] = [
+  DocumentType.ID_CARD_FRONT,
+  DocumentType.ID_CARD_BACK,
+  DocumentType.SELFIE_WITH_ID,
+  DocumentType.DRIVERS_LICENSE,
+  DocumentType.VEHICLE_REGISTRATION,
+  DocumentType.INSURANCE,
+];
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private prisma: PrismaService,
     private mail: MailService,
   ) {}
+
+  /**
+   * 🔧 HELPER : trouve un driverProfile par son id OU par l'id du user lié.
+   * Le dashboard admin envoie tantôt user.id (depuis la liste des chauffeurs),
+   * tantôt driverProfile.id (depuis le détail) — on supporte les deux.
+   */
+  private async findDriverByIdOrUserId(id: string) {
+    let driver = await this.prisma.driverProfile.findUnique({
+      where: { id },
+      include: { user: true },
+    });
+    if (!driver) {
+      driver = await this.prisma.driverProfile.findUnique({
+        where: { userId: id },
+        include: { user: true },
+      });
+    }
+    return driver;
+  }
 
   // ─── Dashboard Stats ───────────────────────────────────────────────────────
   async getDashboardStats() {
@@ -84,8 +116,11 @@ export class AdminService {
   }
 
   async getDriver(id: string) {
-    const driver = await this.prisma.driverProfile.findUnique({
-      where: { id },
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
+
+    return this.prisma.driverProfile.findUnique({
+      where: { id: driver.id },
       include: {
         user: {
           include: {
@@ -101,39 +136,34 @@ export class AdminService {
         },
       },
     });
-    if (!driver) throw new NotFoundException('Chauffeur introuvable');
-    return driver;
   }
 
   async suspendDriver(id: string) {
-    const driver = await this.prisma.driverProfile.findUnique({ where: { id }, include: { user: true } });
+    const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
-    await this.prisma.driverProfile.update({ where: { id }, data: { adminApproved: false } });
+    await this.prisma.driverProfile.update({ where: { id: driver.id }, data: { adminApproved: false } });
     await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: false, accountStatus: 'SUSPENDED' } });
 
     return { message: 'Chauffeur suspendu' };
   }
 
   async activateDriver(id: string) {
-    const driver = await this.prisma.driverProfile.findUnique({ where: { id }, include: { user: true } });
+    const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
-    await this.prisma.driverProfile.update({ where: { id }, data: { adminApproved: true, adminApprovedAt: new Date() } });
-    await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: true, accountStatus: 'ACTIVE' } });
+    await this.prisma.driverProfile.update({ where: { id: driver.id }, data: { adminApproved: true, adminApprovedAt: new Date() } });
+    await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: true, accountStatus: 'ACTIVE', isVerified: true } });
 
     return { message: 'Chauffeur activé' };
   }
 
   async approveOrRejectDriver(id: string, approved: boolean, adminNotes?: string) {
-    const driver = await this.prisma.driverProfile.findUnique({
-      where: { id },
-      include: { user: true },
-    });
+    const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
     await this.prisma.driverProfile.update({
-      where: { id },
+      where: { id: driver.id },
       data: {
         adminApproved: approved,
         adminApprovedAt: approved ? new Date() : null,
@@ -146,15 +176,24 @@ export class AdminService {
       data: {
         accountStatus: approved ? 'ACTIVE' : 'REJECTED',
         isActive: approved,
+        isVerified: approved,
       },
     });
 
     if (approved) {
-      await this.mail.sendDriverApproved(
-        driver.user.email,
-        driver.user.firstName ?? 'Chauffeur',
-      );
+      try {
+        await this.mail.sendDriverApproved(
+          driver.user.email,
+          driver.user.firstName ?? 'Chauffeur',
+        );
+      } catch (e: any) {
+        this.logger.warn(`Email d'approbation non envoyé: ${e?.message || e}`);
+      }
     }
+
+    this.logger.log(
+      `[Driver] ${driver.userId} ${approved ? '✅ ACTIVÉ' : '❌ REJETÉ'} par admin`,
+    );
 
     return { message: approved ? 'Dossier approuvé' : 'Dossier rejeté', adminNotes };
   }
@@ -175,11 +214,22 @@ export class AdminService {
     });
   }
 
+  /**
+   * 🔧 FIX : après approbation d'un document, on vérifie si TOUS les docs requis
+   * du chauffeur sont approuvés. Si oui → activation automatique du compte.
+   * (avant, l'admin devait approuver les docs ET activer le chauffeur manuellement)
+   */
   async approveDocument(id: string) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Document introuvable');
 
-    await this.prisma.document.update({ where: { id }, data: { status: 'APPROVED', reviewedAt: new Date() } });
+    await this.prisma.document.update({
+      where: { id },
+      data: { status: 'APPROVED', reviewedAt: new Date() },
+    });
+
+    await this.maybeAutoActivateDriver(doc.userId);
+
     return { message: 'Document approuvé' };
   }
 
@@ -192,6 +242,54 @@ export class AdminService {
       data: { status: 'REJECTED', rejectionReason: reason ?? null, reviewedAt: new Date() },
     });
     return { message: 'Document rejeté', reason };
+  }
+
+  /**
+   * Active automatiquement le compte chauffeur si tous les documents requis
+   * sont approuvés ET que le compte n'est pas déjà activé.
+   */
+  private async maybeAutoActivateDriver(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { driverProfile: true, documents: true },
+    });
+
+    if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
+
+    const allRequiredApproved = REQUIRED_DRIVER_DOCS.every((r) =>
+      user.documents.some(
+        (d) => d.type === r && d.status === DocumentStatus.APPROVED,
+      ),
+    );
+
+    if (!allRequiredApproved) {
+      this.logger.log(`[Driver ${userId}] Pas encore tous les documents requis approuvés.`);
+      return;
+    }
+
+    if (user.driverProfile.adminApproved && user.accountStatus === 'ACTIVE') {
+      return; // déjà actif
+    }
+
+    await this.prisma.driverProfile.update({
+      where: { id: user.driverProfile.id },
+      data: { adminApproved: true, adminApprovedAt: new Date() },
+    });
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { accountStatus: 'ACTIVE', isActive: true, isVerified: true },
+    });
+
+    this.logger.log(`[Driver ${userId}] ✅ Auto-activé (tous documents approuvés)`);
+
+    try {
+      await this.mail.sendDriverApproved(
+        user.email,
+        user.firstName ?? 'Chauffeur',
+      );
+    } catch (e: any) {
+      this.logger.warn(`Email d'approbation non envoyé: ${e?.message || e}`);
+    }
   }
 
   // ─── Passagers ─────────────────────────────────────────────────────────────
@@ -256,7 +354,7 @@ export class AdminService {
       this.prisma.ride.aggregate({ _sum: { finalPrice: true }, where: { status: 'COMPLETED' } }),
       this.prisma.ride.aggregate({
         _sum: { finalPrice: true },
-        where: { status: 'COMPLETED', completedAt: { gte: new Date(new Date().setHours(0,0,0,0)) } },
+        where: { status: 'COMPLETED', completedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
       }),
       this.prisma.ride.aggregate({
         _sum: { finalPrice: true },
@@ -360,7 +458,6 @@ export class AdminService {
 
     const prixBase = PRISE_EN_CHARGE + distanceKm * tarifKm + durationMin * TARIF_MIN;
 
-    // Coefficients
     const coeffZone: Record<string, number> = {
       normal: 1.0, centre: 1.15, aeroport: 1.3, rural: 0.9,
     };
