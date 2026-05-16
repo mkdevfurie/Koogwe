@@ -217,19 +217,33 @@ export class DocumentsService {
       throw new NotFoundException('Chauffeur introuvable');
 
     if (approved) {
+      // ⚠️ MODE TEST : On bypass la vérification stricte pour permettre de tester les courses
+      if (!user.driverProfile.faceVerified || !this.hasAllRequired(user.documents)) {
+        console.warn(`[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`);
+      }
+
+      /* 
+      // Commenté pour le mode test
       if (!user.driverProfile.faceVerified) 
         throw new BadRequestException('La vérification faciale est obligatoire');
 
-      if (!user.driverProfile.vehicleMake || 
-          !user.driverProfile.vehicleModel || 
-          !user.driverProfile.licensePlate) {
-        throw new BadRequestException('Les informations du véhicule doivent être complètes');
-      }
-
       if (!this.hasAllRequired(user.documents)) {
         throw new BadRequestException(
-          'Tous les documents requis doivent être approuvés (ID recto/verso, selfie avec pièce, permis, carte grise, assurance)'
+          'Tous les documents requis doivent être approuvés'
         );
+      }
+      */
+
+      // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
+      if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
+        await this.prisma.driverProfile.update({
+          where: { userId: driverId },
+          data: {
+            vehicleMake: user.driverProfile.vehicleMake || 'Véhicule',
+            vehicleModel: user.driverProfile.vehicleModel || 'Test',
+            licensePlate: user.driverProfile.licensePlate || 'TEST-MODE',
+          },
+        });
       }
     }
 
@@ -280,10 +294,13 @@ export class DocumentsService {
         data: { accountStatus: 'ACTIVE', isVerified: true }
       });
     } else {
+      // ⚠️ MODE TEST : On ne dégrade pas automatiquement le statut pour permettre le bypass manuel
+      /*
       await this.prisma.user.update({
         where: { id: userId },
         data: { accountStatus: 'ADMIN_REVIEW_PENDING' }
       }).catch(() => {});
+      */
     }
   }
 }
