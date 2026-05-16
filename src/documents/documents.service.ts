@@ -104,16 +104,11 @@ export class DocumentsService {
       },
     });
 
-    // Mise à jour du profil chauffeur (upsert pour éviter erreur si profil inexistant)
-    await this.prisma.driverProfile.upsert({
+    // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
+    await this.prisma.driverProfile.updateMany({
       where: { userId },
-      update: { 
+      data: { 
         documentsUploaded: true, 
-        documentsUploadedAt: new Date(),
-      },
-      create: {
-        userId,
-        documentsUploaded: true,
         documentsUploadedAt: new Date(),
       },
     }).catch(() => undefined);

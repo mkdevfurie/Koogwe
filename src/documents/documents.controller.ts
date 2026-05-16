@@ -1,9 +1,8 @@
 // src/documents/documents.controller.ts
-import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Query, Request, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Request, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { DocumentsService } from './documents.service';
-import { Roles, RolesGuard } from '../auth/guards/jwt-auth.guard';
-import { UseGuards as NG } from '@nestjs/common';
+import { JwtAuthGuard, Roles, RolesGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('Documents')
 @ApiBearerAuth()
@@ -12,6 +11,7 @@ export class DocumentsController {
   constructor(private readonly documentsService: DocumentsService) {}
 
   @Post('upload')
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Uploader un document (base64)' })
   upload(@Request() req: any, @Body() body: { type: string; imageBase64: string }) {
     return this.documentsService.uploadBase64Document({ userId: req.user.id, type: body.type, imageBase64: body.imageBase64 });

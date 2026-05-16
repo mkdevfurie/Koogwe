@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadGatewayException } from '@nestjs/common';
 import { v2 as cloudinary } from 'cloudinary';
 import { ConfigService } from '@nestjs/config';
 
@@ -32,8 +32,8 @@ export class CloudinaryService {
         height: result.height,
       };
     } catch (error) {
-      console.error('Cloudinary upload error:', error);
-      throw new Error('Échec de l\'upload sur Cloudinary');
+      console.error('Cloudinary upload error:', error?.message || error);
+      throw new BadGatewayException('Échec de l\'upload sur Cloudinary. Vérifiez vos credentials CLOUDINARY_*');
     }
   }
 
