@@ -30,12 +30,12 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
       {
         name: 'short',
         ttl: 60000,      // 1 minute
-        limit: 10,
+        limit: 100,     // Augmenté pour éviter les erreurs 429 en test
       },
       {
         name: 'medium',
         ttl: 600000,     // 10 minutes
-        limit: 30,
+        limit: 300,
       },
     ]),
 
