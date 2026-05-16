@@ -7,6 +7,8 @@ import {
   HttpCode,
   HttpStatus,
   Get,
+  BadRequestException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
