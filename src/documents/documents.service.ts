@@ -44,9 +44,7 @@ export class DocumentsService {
   }
 
   /**
-   * 🚨 MODE BYPASS CLOUDINARY 🚨
-   * Stocke le document directement en base sous forme de data URI base64.
-   * À remettre sur Cloudinary plus tard.
+   * Upload d'un document via base64 vers Cloudinary
    */
   async uploadBase64Document(params: {
     userId: string;
@@ -61,39 +59,32 @@ export class DocumentsService {
 
     const docType = parseDocType(type);
 
-    // Décode pour valider et mesurer
-    const cleanBase64 = imageBase64.replace(/^data:[\w/+.-]+;base64,/, '').trim();
-    let buffer: Buffer;
-    try {
-      buffer = Buffer.from(cleanBase64, 'base64');
-    } catch {
-      throw new BadRequestException('Image base64 corrompue');
-    }
-
-    if (buffer.byteLength === 0) {
-      throw new BadRequestException('Image vide après décodage');
-    }
-    if (buffer.byteLength > 8 * 1024 * 1024) {
+    // Vérification taille (8MB max)
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+    
+    if (buffer.byteLength > 8 * 1024 * 1024) 
       throw new BadRequestException('Document trop volumineux (max 8MB)');
+
+    // Upload vers Cloudinary
+    const folder = `koogwe/documents/${userId}/${docType}`;
+    // Cloudinary nécessite le préfixe data URI pour les uploads inline
+    const dataUri = imageBase64.startsWith('data:')
+      ? imageBase64
+      : `data:image/jpeg;base64,${cleanBase64}`;
+
+    let uploadResult;
+    try {
+      uploadResult = await this.cloudinaryService.uploadImage(
+        dataUri,
+        folder
+      );
+    } catch (error) {
+      console.error(`[DocumentsService] Cloudinary upload failed for user ${userId}:`, error);
+      throw error;
     }
 
-    this.logger.log(
-      `📦 [BYPASS-DB] Stockage local du document user=${userId} type=${docType} size=${(buffer.byteLength / 1024).toFixed(0)}KB`,
-    );
-
-    // Détecte le type MIME approximatif depuis les premiers octets
-    let mime = 'image/jpeg';
-    if (buffer.length >= 4) {
-      const sig = buffer.slice(0, 4).toString('hex');
-      if (sig.startsWith('89504e47')) mime = 'image/png';
-      else if (sig.startsWith('25504446')) mime = 'application/pdf';
-      else if (sig.startsWith('ffd8ff')) mime = 'image/jpeg';
-      else if (sig.startsWith('47494638')) mime = 'image/gif';
-    }
-
-    // On stocke la data URI directement dans fileUrl
-    const dataUri = `data:${mime};base64,${cleanBase64}`;
-
+    // Sauvegarde dans la base de données
     let document;
     try {
       document = await this.prisma.document.create({
@@ -105,28 +96,21 @@ export class DocumentsService {
           status: DocumentStatus.PENDING,
         },
       });
-    } catch (error: any) {
-      this.logger.error(
-        `[uploadBase64Document] DB create failed user=${userId}: ${error?.message || error}`,
-      );
+    } catch (error) {
+      console.error(`[DocumentsService] Database create failed for user ${userId}:`, error);
       throw error;
     }
 
-    await this.prisma.driverProfile
-      .updateMany({
-        where: { userId },
-        data: {
-          documentsUploaded: true,
-          documentsUploadedAt: new Date(),
-        },
-      })
-      .catch((err) => {
-        this.logger.warn(
-          `[uploadBase64Document] DriverProfile update échoué user=${userId}: ${err?.message || err}`,
-        );
-      });
-
-    this.logger.log(`✅ Document enregistré: ${document.id} (type=${docType})`);
+    // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
+    await this.prisma.driverProfile.updateMany({
+      where: { userId },
+      data: { 
+        documentsUploaded: true, 
+        documentsUploadedAt: new Date(),
+      },
+    }).catch((err) => {
+      console.error(`[DocumentsService] DriverProfile update failed for user ${userId}:`, err);
+    });
 
     return {
       success: true,
@@ -241,18 +225,25 @@ export class DocumentsService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: driverId },
-      include: { driverProfile: true, documents: true },
+      include: { 
+        driverProfile: true, 
+        documents: true 
+      },
     });
 
     if (!user || user.role !== 'DRIVER' || !user.driverProfile)
       throw new NotFoundException('Chauffeur introuvable');
 
     if (approved) {
+      // ⚠️ MODE TEST : On bypass la vérification stricte pour permettre de tester les courses
       if (!user.driverProfile.faceVerified || !this.hasAllRequired(user.documents)) {
         this.logger.warn(
           `[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`,
         );
       }
+      */
+
+      // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
       if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
         await this.prisma.driverProfile.update({
           where: { userId: driverId },
@@ -312,6 +303,14 @@ export class DocumentsService {
         where: { id: userId },
         data: { accountStatus: 'ACTIVE', isVerified: true },
       });
+    } else {
+      // ⚠️ MODE TEST : On ne dégrade pas automatiquement le statut pour permettre le bypass manuel
+      /*
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { accountStatus: 'ADMIN_REVIEW_PENDING' }
+      }).catch(() => {});
+      */
     }
   }
 }
