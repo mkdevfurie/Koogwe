@@ -37,6 +37,13 @@ export class UsersController {
   // ── Upload avatar via Cloudinary ───────────────────────────────────────────
   // 🔧 FIX : on stocke sur Cloudinary (les fichiers locaux disparaissent sur Railway).
   // L'app passager pointe sur /users/me/avatar via api_constants corrigé.
+  // 🔧 FIX : alias pour compatibilité
+  @Post('upload-avatar')
+  @ApiOperation({ summary: 'Upload photo de profil (base64) - alias' })
+  async uploadAvatarAlias(@Req() req: any, @Body() body: { imageBase64: string }) {
+    return this.uploadAvatar(req, body);
+  }
+
   @Post('me/avatar')
   @ApiOperation({ summary: 'Upload photo de profil (base64)' })
   async uploadAvatar(@Req() req: any, @Body() body: { imageBase64: string }) {
@@ -88,10 +95,22 @@ export class UsersController {
   @ApiOperation({ summary: 'Soumettre les documents pour validation admin' })
   submitDocuments(@Req() req: any) { return this.usersService.markDocumentsUploaded(req.user.id); }
 
+  @Get('me/rides')
+  @ApiOperation({ summary: 'Historique courses passager (alias)' })
+  getHistoryAlias(@Req() req: any, @Query('page') page = 1, @Query('limit') limit = 10) {
+    return this.getHistory(req, page, limit);
+  }
+
   @Get('history')
   @ApiOperation({ summary: 'Historique courses passager' })
   getHistory(@Req() req: any, @Query('page') page = 1, @Query('limit') limit = 10) {
     return this.usersService.getRideHistory(req.user.id, +page, +limit);
+  }
+
+  @Get('me/notifications')
+  @ApiOperation({ summary: 'Notifications passager (alias)' })
+  getNotificationsAlias(@Req() req: any) {
+    return this.getNotifications(req);
   }
 
   @Get('notifications')

@@ -179,7 +179,7 @@ export class DriversService {
       throw new BadRequestException('Informations véhicule manquantes');
     }
 
-    const requiredDocs = ['ID_CARD_FRONT', 'ID_CARD_BACK', 'SELFIE_WITH_ID', 'DRIVERS_LICENSE', 'VEHICLE_REGISTRATION', 'INSURANCE'];
+    const requiredDocs = ['DRIVERS_LICENSE', 'VEHICLE_REGISTRATION', 'INSURANCE', 'TECHNICAL_CONTROL'];
     const hasAllDocs = requiredDocs.every((t) =>
       driver.user.documents.some((d) => d.type === t && d.status === 'APPROVED'),
     );

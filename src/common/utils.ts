@@ -8,12 +8,15 @@ export function parseDocType(type: string): DocumentType {
     license:           DocumentType.DRIVERS_LICENSE,
     drivers_license:   DocumentType.DRIVERS_LICENSE,
     gray_card:         DocumentType.VEHICLE_REGISTRATION,
+    registration:      DocumentType.VEHICLE_REGISTRATION,
     vehicle_registration: DocumentType.VEHICLE_REGISTRATION,
     insurance:         DocumentType.INSURANCE,
     technical_control: DocumentType.TECHNICAL_CONTROL,
+    id_card:           DocumentType.ID_CARD_FRONT, // Par défaut on prend le recto
     id_card_front:     DocumentType.ID_CARD_FRONT,
     id_card_back:      DocumentType.ID_CARD_BACK,
     selfie_with_id:    DocumentType.SELFIE_WITH_ID,
+    vtc_card:          DocumentType.TECHNICAL_CONTROL, // Fallback vers Technical Control ou autre si non existant
   };
 
   const normalized = (type || '').toLowerCase().trim();

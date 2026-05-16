@@ -11,12 +11,10 @@ import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { parseDocType } from '../common/utils';
 
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
-  DocumentType.ID_CARD_FRONT,
-  DocumentType.ID_CARD_BACK,
-  DocumentType.SELFIE_WITH_ID,
   DocumentType.DRIVERS_LICENSE,
   DocumentType.VEHICLE_REGISTRATION,
   DocumentType.INSURANCE,
+  DocumentType.TECHNICAL_CONTROL,
 ];
 
 @Injectable()
@@ -91,8 +89,8 @@ export class DocumentsService {
         data: {
           userId,
           type: docType,
-          fileUrl: dataUri,
-          publicId: `local_${Date.now()}_${userId}`,
+          fileUrl: uploadResult.url,
+          publicId: uploadResult.publicId,
           status: DocumentStatus.PENDING,
         },
       });

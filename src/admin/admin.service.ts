@@ -6,12 +6,10 @@ import { DocumentStatus, DocumentType } from '@prisma/client';
 
 // Documents requis pour qu'un chauffeur soit auto-activé après approbation
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
-  DocumentType.ID_CARD_FRONT,
-  DocumentType.ID_CARD_BACK,
-  DocumentType.SELFIE_WITH_ID,
   DocumentType.DRIVERS_LICENSE,
   DocumentType.VEHICLE_REGISTRATION,
   DocumentType.INSURANCE,
+  DocumentType.TECHNICAL_CONTROL,
 ];
 
 @Injectable()

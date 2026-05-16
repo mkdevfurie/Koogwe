@@ -5,6 +5,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { DriversService } from './drivers.service';
 import { FaceVerificationService } from '../face-verification/face-verification.service';
 import { Roles, RolesGuard, JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 @ApiTags('Drivers')
 @ApiBearerAuth()
@@ -14,6 +15,7 @@ export class DriversController {
   constructor(
     private readonly driversService: DriversService,
     private readonly faceVerificationService: FaceVerificationService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -85,18 +87,23 @@ export class DriversController {
   @Post('documents')
   @ApiOperation({ summary: 'Enregistrer un document (multipart file)' })
   @UseInterceptors(FileInterceptor('file'))
-  uploadDocument(
+  async uploadDocument(
     @Req() req: any,
     @Body('type') type: string,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    // Si c'est un fichier uploadé, utiliser l'URL
+    const userId = req.user.id;
+    // Si c'est un fichier uploadé, l'envoyer vers Cloudinary
     if (file) {
-      return this.driversService.uploadDocument(req.user.id, type, file.path);
+      const result = await this.cloudinary.uploadImage(
+        file.path,
+        `koogwe/documents/${userId}/${type}`,
+      );
+      return this.driversService.uploadDocument(userId, type, result.url);
     }
     // Sinon accepter aussi fileUrl (compatibilité)
     const { fileUrl } = req.body;
-    return this.driversService.uploadDocument(req.user.id, type, fileUrl);
+    return this.driversService.uploadDocument(userId, type, fileUrl);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
