@@ -1,18 +1,22 @@
 // src/users/users.controller.ts
 import {
   Controller, Get, Patch, Post, Delete,
-  Body, Param, Req, Query,
+  Body, Param, Req, Query, BadRequestException, Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { UsersService, UpdateProfileDto, UpdateVehicleDto } from './users.service';
-import { join } from 'path';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 @ApiTags('Users')
 @ApiBearerAuth()
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  private readonly logger = new Logger(UsersController.name);
+
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
 
   @Get('me')
   @ApiOperation({ summary: 'Profil complet' })
@@ -30,32 +34,44 @@ export class UsersController {
     return this.usersService.updateProfile(req.user.id, dto);
   }
 
-  // ── Upload avatar base64 ────────────────────────────────────────────────────
+  // ── Upload avatar via Cloudinary ───────────────────────────────────────────
+  // 🔧 FIX : on stocke sur Cloudinary (les fichiers locaux disparaissent sur Railway).
+  // L'app passager pointe sur /users/me/avatar via api_constants corrigé.
   @Post('me/avatar')
   @ApiOperation({ summary: 'Upload photo de profil (base64)' })
   async uploadAvatar(@Req() req: any, @Body() body: { imageBase64: string }) {
     const userId = req.user.id;
-    const base64 = body.imageBase64;
-    if (!base64) return { error: 'imageBase64 requis' };
+    const base64 = body?.imageBase64;
+    if (!base64 || typeof base64 !== 'string' || base64.length < 100) {
+      throw new BadRequestException('imageBase64 manquant ou invalide');
+    }
 
-    const matches = base64.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-    const ext  = matches ? (matches[1].includes('png') ? 'png' : 'jpg') : 'jpg';
-    const rawData = matches ? matches[2] : base64;
+    // Nettoyage du préfixe data URI (le service Cloudinary l'accepte de toute façon)
+    const cleaned = base64.replace(/^data:[\w/+.-]+;base64,/, '').trim();
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(cleaned, 'base64');
+    } catch {
+      throw new BadRequestException('imageBase64 corrompu');
+    }
+    if (buffer.byteLength === 0) {
+      throw new BadRequestException('Image vide');
+    }
+    if (buffer.byteLength > 5 * 1024 * 1024) {
+      throw new BadRequestException('Avatar trop volumineux (max 5MB)');
+    }
 
-    const dir = join(process.cwd(), 'uploads', 'avatars', userId);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-    const fileName = `avatar_${Date.now()}.${ext}`;
-    writeFileSync(join(dir, fileName), Buffer.from(rawData, 'base64'));
-
-    const baseUrl = process.env.PUBLIC_BASE_URL ||
-      (process.env.RAILWAY_PUBLIC_DOMAIN
-        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-        : 'http://localhost:3000');
-
-    const avatarUrl = `${baseUrl}/uploads/avatars/${userId}/${fileName}`;
-    await this.usersService.updateProfile(userId, { avatarUrl });
-    return { avatarUrl };
+    try {
+      const result = await this.cloudinary.uploadImage(
+        buffer,
+        `koogwe/avatars/${userId}`,
+      );
+      await this.usersService.updateProfile(userId, { avatarUrl: result.url });
+      return { avatarUrl: result.url };
+    } catch (e: any) {
+      this.logger.error(`[uploadAvatar] échec user=${userId}: ${e?.message || e}`);
+      throw e;
+    }
   }
 
   @Patch('vehicle')

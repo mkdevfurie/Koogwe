@@ -1,15 +1,10 @@
-// src/documents/documents.service.ts
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
-import { DocumentStatus, DocumentType } from '@prisma/client';
+// src/admin/admin.service.ts
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CloudinaryService } from '../cloudinary/cloudinary.service';
-import { parseDocType } from '../common/utils';
+import { MailService } from '../mail/mail.service';
+import { DocumentStatus, DocumentType } from '@prisma/client';
 
+// Documents requis pour qu'un chauffeur soit auto-activé après approbation
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
   DocumentType.ID_CARD_FRONT,
   DocumentType.ID_CARD_BACK,
@@ -20,243 +15,155 @@ const REQUIRED_DRIVER_DOCS: DocumentType[] = [
 ];
 
 @Injectable()
-export class DocumentsService {
-  private readonly logger = new Logger(DocumentsService.name);
+export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
 
   constructor(
     private prisma: PrismaService,
-    private cloudinaryService: CloudinaryService,
+    private mail: MailService,
   ) {}
 
-  private toDocStatus(status?: string, approved?: boolean): DocumentStatus {
-    if (typeof approved === 'boolean')
-      return approved ? DocumentStatus.APPROVED : DocumentStatus.REJECTED;
-    const n = (status || '').toUpperCase();
-    if (['APPROVED', 'APPROVE', 'VALIDATED'].includes(n)) return DocumentStatus.APPROVED;
-    if (['REJECTED', 'REJECT', 'REFUSED'].includes(n)) return DocumentStatus.REJECTED;
-    throw new BadRequestException('Status doit être APPROVED ou REJECTED');
-  }
-
-  private hasAllRequired(docs: Array<{ type: DocumentType; status: DocumentStatus }>) {
-    return REQUIRED_DRIVER_DOCS.every((r) =>
-      docs.some((d) => d.type === r && d.status === DocumentStatus.APPROVED),
-    );
-  }
-
   /**
-   * Upload d'un document via base64 vers Cloudinary
+   * 🔧 HELPER : trouve un driverProfile par son id OU par l'id du user lié.
+   * Le dashboard admin envoie tantôt user.id (depuis la liste des chauffeurs),
+   * tantôt driverProfile.id (depuis le détail) — on supporte les deux.
    */
-  async uploadBase64Document(params: {
-    userId: string;
-    type: string;
-    imageBase64: string;
-  }) {
-    const { userId, type, imageBase64 } = params;
-
-    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length < 100) {
-      throw new BadRequestException('Image invalide ou manquante');
-    }
-
-    const docType = parseDocType(type);
-
-    // Vérification taille (8MB max)
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(cleanBase64, 'base64');
-    
-    if (buffer.byteLength > 8 * 1024 * 1024) 
-      throw new BadRequestException('Document trop volumineux (max 8MB)');
-
-    // Upload vers Cloudinary
-    const folder = `koogwe/documents/${userId}/${docType}`;
-    // Cloudinary nécessite le préfixe data URI pour les uploads inline
-    const dataUri = imageBase64.startsWith('data:')
-      ? imageBase64
-      : `data:image/jpeg;base64,${cleanBase64}`;
-
-    let uploadResult;
-    try {
-      uploadResult = await this.cloudinaryService.uploadImage(
-        dataUri,
-        folder
-      );
-    } catch (error) {
-      console.error(`[DocumentsService] Cloudinary upload failed for user ${userId}:`, error);
-      throw error;
-    }
-
-    // Sauvegarde dans la base de données
-    let document;
-    try {
-      document = await this.prisma.document.create({
-        data: {
-          userId,
-          type: docType,
-          fileUrl: dataUri,
-          publicId: `local_${Date.now()}_${userId}`,
-          status: DocumentStatus.PENDING,
-        },
-      });
-    } catch (error) {
-      console.error(`[DocumentsService] Database create failed for user ${userId}:`, error);
-      throw error;
-    }
-
-    // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
-    await this.prisma.driverProfile.updateMany({
-      where: { userId },
-      data: { 
-        documentsUploaded: true, 
-        documentsUploadedAt: new Date(),
-      },
-    }).catch((err) => {
-      console.error(`[DocumentsService] DriverProfile update failed for user ${userId}:`, err);
+  private async findDriverByIdOrUserId(id: string) {
+    let driver = await this.prisma.driverProfile.findUnique({
+      where: { id },
+      include: { user: true },
     });
+    if (!driver) {
+      driver = await this.prisma.driverProfile.findUnique({
+        where: { userId: id },
+        include: { user: true },
+      });
+    }
+    return driver;
+  }
+
+  // ─── Dashboard Stats ───────────────────────────────────────────────────────
+  async getDashboardStats() {
+    const [
+      totalPassengers,
+      totalDrivers,
+      pendingDrivers,
+      totalRides,
+      activeRides,
+      completedRides,
+      cancelledRides,
+      totalRevenue,
+    ] = await Promise.all([
+      this.prisma.user.count({ where: { role: 'PASSENGER' } }),
+      this.prisma.driverProfile.count(),
+      this.prisma.driverProfile.count({ where: { adminApproved: false, documentsUploaded: true } }),
+      this.prisma.ride.count(),
+      this.prisma.ride.count({ where: { status: { in: ['REQUESTED', 'ACCEPTED', 'DRIVER_EN_ROUTE', 'ARRIVED', 'IN_PROGRESS'] } } }),
+      this.prisma.ride.count({ where: { status: 'COMPLETED' } }),
+      this.prisma.ride.count({ where: { status: 'CANCELLED' } }),
+      this.prisma.ride.aggregate({
+        _sum: { finalPrice: true },
+        where: { status: 'COMPLETED' },
+      }),
+    ]);
 
     return {
-      success: true,
-      message: 'Document envoyé avec succès',
-      documentId: document.id,
-      fileUrl: document.fileUrl,
-      publicId: document.publicId,
-      type: docType,
-      status: document.status,
+      passengers: { total: totalPassengers },
+      drivers: { total: totalDrivers, pending: pendingDrivers },
+      rides: {
+        total: totalRides,
+        active: activeRides,
+        completed: completedRides,
+        cancelled: cancelledRides,
+      },
+      revenue: {
+        total: totalRevenue._sum.finalPrice ?? 0,
+      },
     };
   }
 
-  private mapDoc<T extends { fileUrl: string; publicId?: string; user?: any }>(doc: T) {
-    return {
-      ...doc,
-      url: doc.fileUrl,
-      uploaderName: doc.user?.firstName || doc.user?.email || 'Inconnu',
-      uploaderEmail: doc.user?.email ?? null,
-      uploaderId: doc.user?.id ?? null,
-    };
+  // ─── Courses récentes ──────────────────────────────────────────────────────
+  async getRecentRides(limit = 10) {
+    return this.prisma.ride.findMany({
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        passenger: { select: { id: true, firstName: true, lastName: true, email: true, avatarUrl: true } },
+        driver: { select: { id: true, firstName: true, lastName: true, email: true, avatarUrl: true } },
+      },
+    });
   }
 
-  async listPendingDocuments() {
-    const docs = await this.prisma.document.findMany({
-      where: { status: DocumentStatus.PENDING },
+  // ─── Documents en attente ──────────────────────────────────────────────────
+  async getPendingDocuments() {
+    return this.prisma.document.findMany({
+      where: { status: 'PENDING' },
+      orderBy: { uploadedAt: 'desc' },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, email: true } },
+      },
+    });
+  }
+
+  // ─── Chauffeurs ────────────────────────────────────────────────────────────
+  async getAllDrivers() {
+    return this.prisma.driverProfile.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, isActive: true, accountStatus: true, createdAt: true, lastLoginAt: true } },
+      },
+    });
+  }
+
+  async getDriver(id: string) {
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
+
+    return this.prisma.driverProfile.findUnique({
+      where: { id: driver.id },
       include: {
         user: {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            role: true,
-            accountStatus: true,
+          include: {
+            documents: true,
+            driverRides: {
+              take: 10,
+              orderBy: { createdAt: 'desc' },
+              include: {
+                passenger: { select: { firstName: true, lastName: true } },
+              },
+            },
           },
         },
       },
-      orderBy: { uploadedAt: 'asc' },
     });
-    return docs.map((d) => this.mapDoc(d));
   }
 
-  async listApprovedDocuments() {
-    const docs = await this.prisma.document.findMany({
-      where: { status: DocumentStatus.APPROVED },
-      include: { user: { select: { id: true, email: true, firstName: true, role: true } } },
-      orderBy: { reviewedAt: 'desc' },
-      take: 300,
-    });
-    return docs.map((d) => this.mapDoc(d));
+  async suspendDriver(id: string) {
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
+
+    await this.prisma.driverProfile.update({ where: { id: driver.id }, data: { adminApproved: false } });
+    await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: false, accountStatus: 'SUSPENDED' } });
+
+    return { message: 'Chauffeur suspendu' };
   }
 
-  async getDocumentsByStatus(status?: string) {
-    const n = (status || '').toUpperCase();
-    if (n === 'APPROVED') return this.listApprovedDocuments();
-    if (n === 'REJECTED') {
-      const docs = await this.prisma.document.findMany({
-        where: { status: DocumentStatus.REJECTED },
-        include: { user: { select: { id: true, email: true, firstName: true, role: true } } },
-        orderBy: { reviewedAt: 'desc' },
-        take: 300,
-      });
-      return docs.map((d) => this.mapDoc(d));
-    }
-    return this.listPendingDocuments();
+  async activateDriver(id: string) {
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
+
+    await this.prisma.driverProfile.update({ where: { id: driver.id }, data: { adminApproved: true, adminApprovedAt: new Date() } });
+    await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: true, accountStatus: 'ACTIVE', isVerified: true } });
+
+    return { message: 'Chauffeur activé' };
   }
 
-  async reviewDocument(params: {
-    documentId: string;
-    adminId: string;
-    status?: string;
-    approved?: boolean;
-    rejectionReason?: string;
-  }) {
-    const { documentId, adminId, status, approved, rejectionReason } = params;
-    const targetStatus = this.toDocStatus(status, approved);
-
-    const doc = await this.prisma.document.findUnique({ where: { id: documentId } });
-    if (!doc) throw new NotFoundException('Document introuvable');
-
-    const reviewed = await this.prisma.document.update({
-      where: { id: documentId },
-      data: {
-        status: targetStatus,
-        reviewedAt: new Date(),
-        reviewedBy: adminId,
-        rejectionReason:
-          targetStatus === DocumentStatus.REJECTED
-            ? rejectionReason ?? 'Document non conforme'
-            : null,
-      },
-    });
-
-    await this.refreshDriverState(doc.userId);
-
-    return {
-      success: true,
-      message:
-        targetStatus === DocumentStatus.APPROVED
-          ? 'Document approuvé ✅'
-          : 'Document rejeté ❌',
-      document: reviewed,
-    };
-  }
-
-  async decideDriverAccount(params: {
-    driverId: string;
-    adminId: string;
-    approved: boolean;
-    adminNotes?: string;
-  }) {
-    const { driverId, approved, adminNotes } = params;
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: driverId },
-      include: { 
-        driverProfile: true, 
-        documents: true 
-      },
-    });
-
-    if (!user || user.role !== 'DRIVER' || !user.driverProfile)
-      throw new NotFoundException('Chauffeur introuvable');
-
-    if (approved) {
-      // ⚠️ MODE TEST : On bypass la vérification stricte pour permettre de tester les courses
-      if (!user.driverProfile.faceVerified || !this.hasAllRequired(user.documents)) {
-        this.logger.warn(
-          `[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`,
-        );
-      }
-
-      // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
-      if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
-        await this.prisma.driverProfile.update({
-          where: { userId: driverId },
-          data: {
-            vehicleMake: user.driverProfile.vehicleMake || 'Véhicule',
-            vehicleModel: user.driverProfile.vehicleModel || 'Test',
-            licensePlate: user.driverProfile.licensePlate || 'TEST-MODE',
-          },
-        });
-      }
-    }
+  async approveOrRejectDriver(id: string, approved: boolean, adminNotes?: string) {
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
     await this.prisma.driverProfile.update({
-      where: { userId: driverId },
+      where: { id: driver.id },
       data: {
         adminApproved: approved,
         adminApprovedAt: approved ? new Date() : null,
@@ -265,51 +172,339 @@ export class DocumentsService {
     });
 
     await this.prisma.user.update({
-      where: { id: driverId },
+      where: { id: driver.userId },
       data: {
         accountStatus: approved ? 'ACTIVE' : 'REJECTED',
+        isActive: approved,
         isVerified: approved,
       },
     });
 
-    return {
-      success: true,
-      message: approved ? 'Compte chauffeur validé ✅' : 'Compte chauffeur rejeté ❌',
-    };
+    if (approved) {
+      try {
+        await this.mail.sendDriverApproved(
+          driver.user.email,
+          driver.user.firstName ?? 'Chauffeur',
+        );
+      } catch (e: any) {
+        this.logger.warn(`Email d'approbation non envoyé: ${e?.message || e}`);
+      }
+    }
+
+    this.logger.log(
+      `[Driver] ${driver.userId} ${approved ? '✅ ACTIVÉ' : '❌ REJETÉ'} par admin`,
+    );
+
+    return { message: approved ? 'Dossier approuvé' : 'Dossier rejeté', adminNotes };
   }
 
-  private async refreshDriverState(userId: string) {
+  // ─── Documents ─────────────────────────────────────────────────────────────
+  async getAllDocuments(status?: string) {
+    const where: any = {};
+    if (status && status !== 'ALL') {
+      where.status = status;
+    }
+
+    return this.prisma.document.findMany({
+      where,
+      orderBy: { uploadedAt: 'desc' },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, email: true } },
+      },
+    });
+  }
+
+  /**
+   * 🔧 FIX : après approbation d'un document, on vérifie si TOUS les docs requis
+   * du chauffeur sont approuvés. Si oui → activation automatique du compte.
+   * (avant, l'admin devait approuver les docs ET activer le chauffeur manuellement)
+   */
+  async approveDocument(id: string) {
+    const doc = await this.prisma.document.findUnique({ where: { id } });
+    if (!doc) throw new NotFoundException('Document introuvable');
+
+    await this.prisma.document.update({
+      where: { id },
+      data: { status: 'APPROVED', reviewedAt: new Date() },
+    });
+
+    await this.maybeAutoActivateDriver(doc.userId);
+
+    return { message: 'Document approuvé' };
+  }
+
+  async rejectDocument(id: string, reason?: string) {
+    const doc = await this.prisma.document.findUnique({ where: { id } });
+    if (!doc) throw new NotFoundException('Document introuvable');
+
+    await this.prisma.document.update({
+      where: { id },
+      data: { status: 'REJECTED', rejectionReason: reason ?? null, reviewedAt: new Date() },
+    });
+    return { message: 'Document rejeté', reason };
+  }
+
+  /**
+   * Active automatiquement le compte chauffeur si tous les documents requis
+   * sont approuvés ET que le compte n'est pas déjà activé.
+   */
+  private async maybeAutoActivateDriver(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: { driverProfile: true, documents: true },
     });
+
     if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
 
-    const allApproved = this.hasAllRequired(user.documents);
-    const hasVehicle = !!(
-      user.driverProfile.vehicleMake &&
-      user.driverProfile.vehicleModel &&
-      user.driverProfile.licensePlate
+    const allRequiredApproved = REQUIRED_DRIVER_DOCS.every((r) =>
+      user.documents.some(
+        (d) => d.type === r && d.status === DocumentStatus.APPROVED,
+      ),
     );
-    const faceOk = !!user.driverProfile.faceVerified;
 
-    if (allApproved && hasVehicle && faceOk) {
-      await this.prisma.driverProfile.update({
-        where: { userId },
-        data: { adminApproved: true, adminApprovedAt: new Date() },
-      });
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { accountStatus: 'ACTIVE', isVerified: true },
-      });
-    } else {
-      // ⚠️ MODE TEST : On ne dégrade pas automatiquement le statut pour permettre le bypass manuel
-      /*
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { accountStatus: 'ADMIN_REVIEW_PENDING' }
-      }).catch(() => {});
-      */
+    if (!allRequiredApproved) {
+      this.logger.log(`[Driver ${userId}] Pas encore tous les documents requis approuvés.`);
+      return;
     }
+
+    if (user.driverProfile.adminApproved && user.accountStatus === 'ACTIVE') {
+      return; // déjà actif
+    }
+
+    await this.prisma.driverProfile.update({
+      where: { id: user.driverProfile.id },
+      data: { adminApproved: true, adminApprovedAt: new Date() },
+    });
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { accountStatus: 'ACTIVE', isActive: true, isVerified: true },
+    });
+
+    this.logger.log(`[Driver ${userId}] ✅ Auto-activé (tous documents approuvés)`);
+
+    try {
+      await this.mail.sendDriverApproved(
+        user.email,
+        user.firstName ?? 'Chauffeur',
+      );
+    } catch (e: any) {
+      this.logger.warn(`Email d'approbation non envoyé: ${e?.message || e}`);
+    }
+  }
+
+  // ─── Passagers ─────────────────────────────────────────────────────────────
+  async getAllPassengers() {
+    return this.prisma.user.findMany({
+      where: { role: 'PASSENGER' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        avatarUrl: true,
+        isActive: true,
+        isVerified: true,
+        createdAt: true,
+        _count: { select: { passengerRides: true } },
+      },
+    });
+  }
+
+  async suspendPassenger(id: string) {
+    await this.prisma.user.update({ where: { id }, data: { isActive: false } });
+    return { message: 'Passager suspendu' };
+  }
+
+  async activatePassenger(id: string) {
+    await this.prisma.user.update({ where: { id }, data: { isActive: true } });
+    return { message: 'Passager activé' };
+  }
+
+  // ─── Courses ───────────────────────────────────────────────────────────────
+  async getAllRides(limit = 50) {
+    return this.prisma.ride.findMany({
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        passenger: { select: { firstName: true, lastName: true, email: true } },
+        driver: { select: { firstName: true, lastName: true } },
+        payment: true,
+      },
+    });
+  }
+
+  async getActiveRides() {
+    return this.prisma.ride.findMany({
+      where: {
+        status: { in: ['REQUESTED', 'ACCEPTED', 'DRIVER_EN_ROUTE', 'ARRIVED', 'IN_PROGRESS'] },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        passenger: { select: { firstName: true, lastName: true } },
+        driver: { select: { firstName: true, lastName: true } },
+      },
+    });
+  }
+
+  // ─── Finances ──────────────────────────────────────────────────────────────
+  async getFinanceStats() {
+    const [totalRevenue, todayRevenue, weekRevenue, monthRevenue] = await Promise.all([
+      this.prisma.ride.aggregate({ _sum: { finalPrice: true }, where: { status: 'COMPLETED' } }),
+      this.prisma.ride.aggregate({
+        _sum: { finalPrice: true },
+        where: { status: 'COMPLETED', completedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+      }),
+      this.prisma.ride.aggregate({
+        _sum: { finalPrice: true },
+        where: { status: 'COMPLETED', completedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } },
+      }),
+      this.prisma.ride.aggregate({
+        _sum: { finalPrice: true },
+        where: { status: 'COMPLETED', completedAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+      }),
+    ]);
+
+    return {
+      total: totalRevenue._sum.finalPrice ?? 0,
+      today: todayRevenue._sum.finalPrice ?? 0,
+      week: weekRevenue._sum.finalPrice ?? 0,
+      month: monthRevenue._sum.finalPrice ?? 0,
+    };
+  }
+
+  async getFinanceChart(period: 'daily' | 'weekly' | 'monthly' = 'weekly') {
+    const days = period === 'daily' ? 7 : period === 'weekly' ? 4 : 12;
+    const data = [];
+
+    for (let i = days - 1; i >= 0; i--) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const start = new Date(date.setHours(0, 0, 0, 0));
+      const end = new Date(date.setHours(23, 59, 59, 999));
+
+      const result = await this.prisma.ride.aggregate({
+        _sum: { finalPrice: true },
+        _count: { id: true },
+        where: { status: 'COMPLETED', completedAt: { gte: start, lte: end } },
+      });
+
+      data.push({
+        date: start.toISOString().split('T')[0],
+        revenue: result._sum.finalPrice ?? 0,
+        rides: result._count.id ?? 0,
+      });
+    }
+
+    return data;
+  }
+
+  async getFinanceTransactions(page = 1, limit = 20) {
+    const skip = (page - 1) * limit;
+    const [transactions, total] = await Promise.all([
+      this.prisma.ride.findMany({
+        skip,
+        take: limit,
+        where: { status: 'COMPLETED', finalPrice: { not: null } },
+        orderBy: { completedAt: 'desc' },
+        select: {
+          id: true,
+          finalPrice: true,
+          paymentMethod: true,
+          completedAt: true,
+          passenger: { select: { firstName: true, lastName: true } },
+          driver: { select: { firstName: true, lastName: true } },
+        },
+      }),
+      this.prisma.ride.count({ where: { status: 'COMPLETED', finalPrice: { not: null } } }),
+    ]);
+
+    return { transactions, total, page, limit };
+  }
+
+  // ─── Simulateur de prix ────────────────────────────────────────────────────
+  estimatePrice(params: {
+    distanceKm: number;
+    durationMin: number;
+    vehicleType: string;
+    zone?: string;
+    timeOfDay?: string;
+    trafficLevel?: string;
+    weatherCondition?: string;
+    demandLevel?: string;
+  }) {
+    const {
+      distanceKm, durationMin, vehicleType,
+      zone = 'normal', timeOfDay = 'normal',
+      trafficLevel = 'fluide', weatherCondition = 'normale', demandLevel = 'normale',
+    } = params;
+
+    const PRISE_EN_CHARGE = Number(process.env.PRICING_PICKUP_FEE ?? 3);
+    const TARIF_KM: Record<string, number> = {
+      MOTO:    Number(process.env.PRICING_KM_MOTO    ?? 1.0),
+      ECO:     Number(process.env.PRICING_KM_ECO     ?? 1.2),
+      CONFORT: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
+      VAN:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
+      BERLINE: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
+      SUV:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
+      LUXE:    Number(process.env.PRICING_KM_LUXE    ?? 2.5),
+    };
+    const TARIF_MIN = Number(process.env.PRICING_MINUTE_RATE ?? 0.30);
+    const MINIMUM   = Number(process.env.PRICING_MIN_PRICE   ?? 7);
+
+    const vt = (vehicleType || 'ECO').toUpperCase();
+    const tarifKm = TARIF_KM[vt] ?? TARIF_KM['ECO'];
+
+    const prixBase = PRISE_EN_CHARGE + distanceKm * tarifKm + durationMin * TARIF_MIN;
+
+    const coeffZone: Record<string, number> = {
+      normal: 1.0, centre: 1.15, aeroport: 1.3, rural: 0.9,
+    };
+    const coeffHoraire: Record<string, number> = {
+      normal: 1.0, pointe: 1.3, nuit: 1.4, creuse: 0.85,
+    };
+    const coeffTrafic: Record<string, number> = {
+      fluide: 1.0, modere: 1.1, dense: 1.25, bloque: 1.5,
+    };
+    const coeffMeteo: Record<string, number> = {
+      normale: 1.0, pluie: 1.1, forte_pluie: 1.25, tempete: 1.5,
+    };
+    const coeffDemande: Record<string, number> = {
+      normale: 1.0, forte: 1.2, tres_forte: 1.5, critique: 2.0,
+    };
+
+    const cZone     = coeffZone[zone]                  ?? 1.0;
+    const cHoraire  = coeffHoraire[timeOfDay]          ?? 1.0;
+    const cTrafic   = coeffTrafic[trafficLevel]        ?? 1.0;
+    const cMeteo    = coeffMeteo[weatherCondition]     ?? 1.0;
+    const cDemande  = coeffDemande[demandLevel]        ?? 1.0;
+    const cTotal    = cZone * cHoraire * cTrafic * cMeteo * cDemande;
+
+    const estimate = Math.max(
+      Math.round(prixBase * cTotal * 100) / 100,
+      MINIMUM,
+    );
+
+    const commission = Number(process.env.COMMISSION_RATE ?? 0.15);
+
+    return {
+      estimate,
+      currency: process.env.CURRENCY ?? 'XOF',
+      breakdown: {
+        priseEnCharge: PRISE_EN_CHARGE,
+        prixDistance:  Math.round(distanceKm * tarifKm * 100) / 100,
+        prixTemps:     Math.round(durationMin * TARIF_MIN * 100) / 100,
+        prixBase:      Math.round(prixBase * 100) / 100,
+        coefficients: {
+          zone: cZone, horaire: cHoraire, trafic: cTrafic,
+          meteo: cMeteo, demande: cDemande, total: Math.round(cTotal * 100) / 100,
+        },
+      },
+      split: {
+        chauffeur:  Math.round(estimate * (1 - commission) * 100) / 100,
+        plateforme: Math.round(estimate * commission * 100) / 100,
+      },
+    };
   }
 }
