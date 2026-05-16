@@ -1,5 +1,10 @@
 // src/documents/documents.service.ts
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { DocumentStatus, DocumentType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
@@ -16,13 +21,15 @@ const REQUIRED_DRIVER_DOCS: DocumentType[] = [
 
 @Injectable()
 export class DocumentsService {
+  private readonly logger = new Logger(DocumentsService.name);
+
   constructor(
     private prisma: PrismaService,
     private cloudinaryService: CloudinaryService,
   ) {}
 
   private toDocStatus(status?: string, approved?: boolean): DocumentStatus {
-    if (typeof approved === 'boolean') 
+    if (typeof approved === 'boolean')
       return approved ? DocumentStatus.APPROVED : DocumentStatus.REJECTED;
 
     const n = (status || '').toUpperCase();
@@ -33,52 +40,61 @@ export class DocumentsService {
   }
 
   private hasAllRequired(docs: Array<{ type: DocumentType; status: DocumentStatus }>) {
-    return REQUIRED_DRIVER_DOCS.every((r) => 
-      docs.some((d) => d.type === r && d.status === DocumentStatus.APPROVED)
+    return REQUIRED_DRIVER_DOCS.every((r) =>
+      docs.some((d) => d.type === r && d.status === DocumentStatus.APPROVED),
     );
   }
 
   /**
-   * Upload d'un document via base64 vers Cloudinary
+   * Upload d'un document via base64 vers Cloudinary.
+   * - Décodage base64 → Buffer
+   * - Contrôle taille (8 MB)
+   * - Upload via upload_stream (chunké, fiable pour gros fichiers)
+   * - Sauvegarde en base
    */
-  async uploadBase64Document(params: { 
-    userId: string; 
-    type: string; 
-    imageBase64: string 
+  async uploadBase64Document(params: {
+    userId: string;
+    type: string;
+    imageBase64: string;
   }) {
     const { userId, type, imageBase64 } = params;
 
-    if (!imageBase64 || imageBase64.length < 100) 
-      throw new BadRequestException('Image invalide');
+    if (!imageBase64 || typeof imageBase64 !== 'string' || imageBase64.length < 100) {
+      throw new BadRequestException('Image invalide ou manquante');
+    }
 
     const docType = parseDocType(type);
 
-    // Vérification taille (8MB max)
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(cleanBase64, 'base64');
-    
-    if (buffer.byteLength > 8 * 1024 * 1024) 
-      throw new BadRequestException('Document trop volumineux (max 8MB)');
-
-    // Upload vers Cloudinary
-    const folder = `koogwe/documents/${userId}/${docType}`;
-    // Cloudinary nécessite le préfixe data URI pour les uploads inline
-    const dataUri = imageBase64.startsWith('data:')
-      ? imageBase64
-      : `data:image/jpeg;base64,${cleanBase64}`;
-
-    let uploadResult;
+    // Nettoyage + décodage base64 → Buffer (une seule fois)
+    const cleanBase64 = imageBase64.replace(/^data:[\w/+.-]+;base64,/, '').trim();
+    let buffer: Buffer;
     try {
-      uploadResult = await this.cloudinaryService.uploadImage(
-        dataUri,
-        folder
+      buffer = Buffer.from(cleanBase64, 'base64');
+    } catch {
+      throw new BadRequestException('Image base64 corrompue');
+    }
+
+    if (buffer.byteLength === 0) {
+      throw new BadRequestException('Image vide après décodage');
+    }
+    if (buffer.byteLength > 8 * 1024 * 1024) {
+      throw new BadRequestException('Document trop volumineux (max 8MB)');
+    }
+
+    // Upload vers Cloudinary (Buffer streamé, plus fiable que l'upload inline base64)
+    const folder = `koogwe/documents/${userId}/${docType}`;
+    let uploadResult: { publicId: string; url: string };
+    try {
+      uploadResult = await this.cloudinaryService.uploadImage(buffer, folder);
+    } catch (error: any) {
+      this.logger.error(
+        `[uploadBase64Document] Cloudinary failed user=${userId} type=${docType}: ${error?.message || error}`,
       );
-    } catch (error) {
-      console.error(`[DocumentsService] Cloudinary upload failed for user ${userId}:`, error);
+      // On laisse remonter l'exception typée (BadGateway/PayloadTooLarge/BadRequest/Internal)
       throw error;
     }
 
-    // Sauvegarde dans la base de données
+    // Sauvegarde DB
     let document;
     try {
       document = await this.prisma.document.create({
@@ -90,25 +106,33 @@ export class DocumentsService {
           status: DocumentStatus.PENDING,
         },
       });
-    } catch (error) {
-      console.error(`[DocumentsService] Database create failed for user ${userId}:`, error);
+    } catch (error: any) {
+      this.logger.error(
+        `[uploadBase64Document] DB create failed user=${userId}: ${error?.message || error}`,
+      );
+      // Tentative de nettoyage : on supprime l'image orpheline sur Cloudinary
+      this.cloudinaryService.deleteImage(uploadResult.publicId).catch(() => undefined);
       throw error;
     }
 
-    // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
-    await this.prisma.driverProfile.updateMany({
-      where: { userId },
-      data: { 
-        documentsUploaded: true, 
-        documentsUploadedAt: new Date(),
-      },
-    }).catch((err) => {
-      console.error(`[DocumentsService] DriverProfile update failed for user ${userId}:`, err);
-    });
+    // Mise à jour du profil chauffeur (best effort)
+    await this.prisma.driverProfile
+      .updateMany({
+        where: { userId },
+        data: {
+          documentsUploaded: true,
+          documentsUploadedAt: new Date(),
+        },
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `[uploadBase64Document] DriverProfile update échoué user=${userId}: ${err?.message || err}`,
+        );
+      });
 
     return {
       success: true,
-      message: 'Document envoyé avec succès sur Cloudinary',
+      message: 'Document envoyé avec succès',
       documentId: document.id,
       fileUrl: uploadResult.url,
       publicId: uploadResult.publicId,
@@ -130,7 +154,17 @@ export class DocumentsService {
   async listPendingDocuments() {
     const docs = await this.prisma.document.findMany({
       where: { status: DocumentStatus.PENDING },
-      include: { user: { select: { id: true, email: true, firstName: true, role: true, accountStatus: true } } },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            role: true,
+            accountStatus: true,
+          },
+        },
+      },
       orderBy: { uploadedAt: 'asc' },
     });
     return docs.map((d) => this.mapDoc(d));
@@ -161,12 +195,12 @@ export class DocumentsService {
     return this.listPendingDocuments();
   }
 
-  async reviewDocument(params: { 
-    documentId: string; 
-    adminId: string; 
-    status?: string; 
-    approved?: boolean; 
-    rejectionReason?: string 
+  async reviewDocument(params: {
+    documentId: string;
+    adminId: string;
+    status?: string;
+    approved?: boolean;
+    rejectionReason?: string;
   }) {
     const { documentId, adminId, status, approved, rejectionReason } = params;
     const targetStatus = this.toDocStatus(status, approved);
@@ -180,61 +214,52 @@ export class DocumentsService {
         status: targetStatus,
         reviewedAt: new Date(),
         reviewedBy: adminId,
-        rejectionReason: targetStatus === DocumentStatus.REJECTED 
-          ? (rejectionReason ?? 'Document non conforme') 
-          : null,
+        rejectionReason:
+          targetStatus === DocumentStatus.REJECTED
+            ? rejectionReason ?? 'Document non conforme'
+            : null,
       },
     });
 
     await this.refreshDriverState(doc.userId);
-    
-    return { 
-      success: true, 
-      message: targetStatus === DocumentStatus.APPROVED 
-        ? 'Document approuvé ✅' 
-        : 'Document rejeté ❌', 
-      document: reviewed 
+
+    return {
+      success: true,
+      message:
+        targetStatus === DocumentStatus.APPROVED
+          ? 'Document approuvé ✅'
+          : 'Document rejeté ❌',
+      document: reviewed,
     };
   }
 
-  async decideDriverAccount(params: { 
-    driverId: string; 
-    adminId: string; 
-    approved: boolean; 
-    adminNotes?: string 
+  async decideDriverAccount(params: {
+    driverId: string;
+    adminId: string;
+    approved: boolean;
+    adminNotes?: string;
   }) {
     const { driverId, approved, adminNotes } = params;
 
     const user = await this.prisma.user.findUnique({
       where: { id: driverId },
-      include: { 
-        driverProfile: true, 
-        documents: true 
+      include: {
+        driverProfile: true,
+        documents: true,
       },
     });
 
-    if (!user || user.role !== 'DRIVER' || !user.driverProfile) 
+    if (!user || user.role !== 'DRIVER' || !user.driverProfile)
       throw new NotFoundException('Chauffeur introuvable');
 
     if (approved) {
-      // ⚠️ MODE TEST : On bypass la vérification stricte pour permettre de tester les courses
+      // ⚠️ MODE TEST : bypass de la vérification stricte
       if (!user.driverProfile.faceVerified || !this.hasAllRequired(user.documents)) {
-        console.warn(`[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`);
-      }
-
-      /* 
-      // Commenté pour le mode test
-      if (!user.driverProfile.faceVerified) 
-        throw new BadRequestException('La vérification faciale est obligatoire');
-
-      if (!this.hasAllRequired(user.documents)) {
-        throw new BadRequestException(
-          'Tous les documents requis doivent être approuvés'
+        this.logger.warn(
+          `[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`,
         );
       }
-      */
 
-      // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
       if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
         await this.prisma.driverProfile.update({
           where: { userId: driverId },
@@ -249,24 +274,24 @@ export class DocumentsService {
 
     await this.prisma.driverProfile.update({
       where: { userId: driverId },
-      data: { 
-        adminApproved: approved, 
-        adminApprovedAt: approved ? new Date() : null, 
-        adminNotes: adminNotes ?? null 
+      data: {
+        adminApproved: approved,
+        adminApprovedAt: approved ? new Date() : null,
+        adminNotes: adminNotes ?? null,
       },
     });
 
     await this.prisma.user.update({
       where: { id: driverId },
-      data: { 
-        accountStatus: approved ? 'ACTIVE' : 'REJECTED', 
-        isVerified: approved 
+      data: {
+        accountStatus: approved ? 'ACTIVE' : 'REJECTED',
+        isVerified: approved,
       },
     });
 
-    return { 
-      success: true, 
-      message: approved ? 'Compte chauffeur validé ✅' : 'Compte chauffeur rejeté ❌' 
+    return {
+      success: true,
+      message: approved ? 'Compte chauffeur validé ✅' : 'Compte chauffeur rejeté ❌',
     };
   }
 
@@ -279,28 +304,23 @@ export class DocumentsService {
     if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
 
     const allApproved = this.hasAllRequired(user.documents);
-    const hasVehicle = !!(user.driverProfile.vehicleMake && 
-                         user.driverProfile.vehicleModel && 
-                         user.driverProfile.licensePlate);
+    const hasVehicle = !!(
+      user.driverProfile.vehicleMake &&
+      user.driverProfile.vehicleModel &&
+      user.driverProfile.licensePlate
+    );
     const faceOk = !!user.driverProfile.faceVerified;
 
     if (allApproved && hasVehicle && faceOk) {
       await this.prisma.driverProfile.update({
         where: { userId },
-        data: { adminApproved: true, adminApprovedAt: new Date() }
+        data: { adminApproved: true, adminApprovedAt: new Date() },
       });
       await this.prisma.user.update({
         where: { id: userId },
-        data: { accountStatus: 'ACTIVE', isVerified: true }
+        data: { accountStatus: 'ACTIVE', isVerified: true },
       });
-    } else {
-      // ⚠️ MODE TEST : On ne dégrade pas automatiquement le statut pour permettre le bypass manuel
-      /*
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { accountStatus: 'ADMIN_REVIEW_PENDING' }
-      }).catch(() => {});
-      */
     }
+    // ⚠️ MODE TEST : on ne dégrade pas automatiquement le statut.
   }
 }
