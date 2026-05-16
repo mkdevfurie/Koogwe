@@ -117,6 +117,7 @@ export class WalletService {
       });
       return { clientSecret: intent.client_secret, paymentIntentId: intent.id };
     } catch (e) {
+      this.logger.error(`Stripe error creating intent: ${(e as any).message}`, (e as any).stack);
       throw new Error(`Stripe error: ${(e as any).message}`);
     }
   }
@@ -135,6 +136,7 @@ export class WalletService {
         amount = intent.amount / 100;
         resolvedUserId = intent.metadata?.userId ?? resolvedUserId;
       } catch (e) {
+        this.logger.error(`Stripe confirm error for intent ${paymentIntentId}: ${(e as any).message}`, (e as any).stack);
         throw new Error(`Stripe confirm error: ${(e as any).message}`);
       }
     } else {

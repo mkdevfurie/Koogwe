@@ -88,21 +88,34 @@ export class DocumentsService {
     const dataUri = imageBase64.startsWith('data:')
       ? imageBase64
       : `data:image/jpeg;base64,${cleanBase64}`;
-    const uploadResult = await this.cloudinaryService.uploadImage(
-      dataUri,
-      folder
-    );
+
+    let uploadResult;
+    try {
+      uploadResult = await this.cloudinaryService.uploadImage(
+        dataUri,
+        folder
+      );
+    } catch (error) {
+      console.error(`[DocumentsService] Cloudinary upload failed for user ${userId}:`, error);
+      throw error;
+    }
 
     // Sauvegarde dans la base de données
-    const document = await this.prisma.document.create({
-      data: {
-        userId,
-        type: docType,
-        fileUrl: uploadResult.url,           // URL Cloudinary[](https://res.cloudinary.com/...)
-        publicId: uploadResult.publicId,     // Important pour suppression future
-        status: DocumentStatus.PENDING,
-      },
-    });
+    let document;
+    try {
+      document = await this.prisma.document.create({
+        data: {
+          userId,
+          type: docType,
+          fileUrl: uploadResult.url,           // URL Cloudinary
+          publicId: uploadResult.publicId,     // Important pour suppression future
+          status: DocumentStatus.PENDING,
+        },
+      });
+    } catch (error) {
+      console.error(`[DocumentsService] Database create failed for user ${userId}:`, error);
+      throw error;
+    }
 
     // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
     await this.prisma.driverProfile.updateMany({
@@ -111,7 +124,9 @@ export class DocumentsService {
         documentsUploaded: true, 
         documentsUploadedAt: new Date(),
       },
-    }).catch(() => undefined);
+    }).catch((err) => {
+      console.error(`[DocumentsService] DriverProfile update failed for user ${userId}:`, err);
+    });
 
     return {
       success: true,

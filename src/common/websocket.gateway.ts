@@ -17,13 +17,19 @@ import { PrismaService } from '../prisma/prisma.service';
 @WebSocketGateway({
   cors: {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      if (!origin) return callback(null, true);
-      const allowedOrigins = (process.env.FRONTEND_URLS || '')
-        .split(',')
-        .map((u) => u.trim())
-        .filter(Boolean)
-        .concat(['http://localhost:3000', 'http://localhost:5173', 'http://localhost:8080']);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      const allowedOrigins = [
+        'https://admin-koogwe-rho.vercel.app',
+        'https://admin-koogwe.vercel.app',
+        ...(process.env.FRONTEND_URLS ? process.env.FRONTEND_URLS.split(',').map((u) => u.trim()) : []),
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'http://localhost:8080',
+        'http://localhost:4173',
+      ].filter(Boolean);
+
+      const isVercelPreview = origin && /^https:\/\/admin-koogwe[a-z0-9-]*\.vercel\.app$/.test(origin);
+
+      if (!origin || allowedOrigins.includes(origin) || isVercelPreview) return callback(null, true);
       callback(new Error(`CORS WebSocket bloqué: ${origin}`));
     },
     credentials: true,

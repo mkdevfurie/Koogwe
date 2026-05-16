@@ -92,8 +92,12 @@ export class MailService {
         html,
       });
     } catch (error) {
-      this.logger.error(`Erreur envoi email: ${error.message}`);
-      throw error;
+      this.logger.error(`Erreur envoi email à ${to} [Sujet: ${subject}]: ${error.message}`);
+      // On ne rebalance pas l'erreur pour éviter de casser le flux principal (ex: création de course)
+      // sauf si c'est critique (ex: envoi OTP)
+      if (subject.includes('code') || subject.includes('OTP')) {
+        throw error;
+      }
     }
   }
 }
