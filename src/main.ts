@@ -21,18 +21,27 @@ async function bootstrap() {
 app.enableCors({
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     const allowedOrigins = [
-      'https://admin-koogwe-rho.vercel.app',     // ← TON ADMIN PANEL
-      ...(process.env.FRONTEND_URLS 
+      // ── Admin Panel ──────────────────────────────────────────────
+      'https://admin-koogwe-rho.vercel.app',
+      'https://admin-koogwe.vercel.app',
+      // ── Origines dynamiques via variable d'env ────────────────────
+      ...(process.env.FRONTEND_URLS
         ? process.env.FRONTEND_URLS.split(',').map((u: string) => u.trim())
         : []),
+      // ── Dev local ────────────────────────────────────────────────
       'http://localhost:3000',
       'http://localhost:5173',
       'http://localhost:8080',
+      'http://localhost:4173',
     ].filter(Boolean);
 
-    if (!origin || allowedOrigins.includes(origin)) {
+    // Accepte aussi tous les sous-domaines vercel.app du projet admin
+    const isVercelPreview = origin && /^https:\/\/admin-koogwe[a-z0-9-]*\.vercel\.app$/.test(origin);
+
+    if (!origin || allowedOrigins.includes(origin) || isVercelPreview) {
       callback(null, true);
     } else {
+      logger.warn(`CORS bloqué pour l'origine: ${origin}`);
       callback(new Error(`CORS bloqué : ${origin}`), false);
     }
   },
@@ -42,6 +51,7 @@ app.enableCors({
   preflightContinue: false,
   optionsSuccessStatus: 204,
 });
+
 
   // ─── Préfixe global /api ──────────────────────────────────────────────────
   app.setGlobalPrefix('api');
