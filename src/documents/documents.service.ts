@@ -241,7 +241,6 @@ export class DocumentsService {
           `[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`,
         );
       }
-      */
 
       // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
       if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
