@@ -488,7 +488,7 @@ export class AdminService {
 
     return {
       estimate,
-      currency: process.env.CURRENCY ?? 'XOF',
+      currency: process.env.CURRENCY ?? 'EUR',
       breakdown: {
         priseEnCharge: PRISE_EN_CHARGE,
         prixDistance:  Math.round(distanceKm * tarifKm * 100) / 100,
