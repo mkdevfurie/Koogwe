@@ -1,16 +1,12 @@
 // src/documents/documents.service.ts
 import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
+  BadRequestException, Injectable, Logger, NotFoundException,
 } from '@nestjs/common';
 import { DocumentStatus, DocumentType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { parseDocType } from '../common/utils';
 
-// 🔧 Aligné avec ce que l'app chauffeur upload réellement (4 documents)
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
   DocumentType.DRIVERS_LICENSE,
   DocumentType.VEHICLE_REGISTRATION,
@@ -42,13 +38,6 @@ export class DocumentsService {
     );
   }
 
-  /**
-   * Upload d'un document via base64 → Buffer → Cloudinary stream.
-   * 🔧 FIX 500: passe un Buffer au CloudinaryService (stream upload),
-   *    bien plus fiable que l'upload inline base64.
-   * 🔧 FIX doublon: si le même type existe déjà en PENDING/REJECTED,
-   *    on le remplace au lieu d'en créer un nouveau.
-   */
   async uploadBase64Document(params: {
     userId: string;
     type: string;
@@ -62,7 +51,6 @@ export class DocumentsService {
 
     const docType = parseDocType(type);
 
-    // Nettoyage + décodage en Buffer (une seule fois)
     const cleanBase64 = imageBase64.replace(/^data:[\w/+.-]+;base64,/, '').trim();
     let buffer: Buffer;
     try {
@@ -71,35 +59,27 @@ export class DocumentsService {
       throw new BadRequestException('Image base64 corrompue');
     }
 
-    if (buffer.byteLength === 0) {
-      throw new BadRequestException('Image vide après décodage');
-    }
+    if (buffer.byteLength === 0) throw new BadRequestException('Image vide');
     if (buffer.byteLength > 8 * 1024 * 1024) {
       throw new BadRequestException('Document trop volumineux (max 8MB)');
     }
 
-    this.logger.log(
-      `📤 Upload document user=${userId} type=${docType} size=${(buffer.byteLength / 1024).toFixed(0)}KB`,
-    );
+    this.logger.log(`📤 Upload doc user=${userId} type=${docType} size=${(buffer.byteLength / 1024).toFixed(0)}KB`);
 
     const folder = `koogwe/documents/${userId}/${docType}`;
     let uploadResult: { publicId: string; url: string };
     try {
       uploadResult = await this.cloudinaryService.uploadImage(buffer, folder);
     } catch (error: any) {
-      this.logger.error(
-        `[uploadBase64Document] Cloudinary failed user=${userId} type=${docType}: ${error?.message || error}`,
-      );
+      this.logger.error(`Cloudinary failed user=${userId}: ${error?.message || error}`);
       throw error;
     }
 
-    // 🔧 Upsert : si un doc du même type existe en PENDING/REJECTED, on le remplace
     let document;
     try {
       const existing = await this.prisma.document.findFirst({
         where: {
-          userId,
-          type: docType,
+          userId, type: docType,
           status: { in: [DocumentStatus.PENDING, DocumentStatus.REJECTED] },
         },
       });
@@ -123,8 +103,7 @@ export class DocumentsService {
       } else {
         document = await this.prisma.document.create({
           data: {
-            userId,
-            type: docType,
+            userId, type: docType,
             fileUrl: uploadResult.url,
             publicId: uploadResult.publicId,
             status: DocumentStatus.PENDING,
@@ -132,21 +111,17 @@ export class DocumentsService {
         });
       }
     } catch (error: any) {
-      this.logger.error(
-        `[uploadBase64Document] DB write failed user=${userId}: ${error?.message || error}`,
-      );
+      this.logger.error(`DB write failed user=${userId}: ${error?.message || error}`);
       this.cloudinaryService.deleteImage(uploadResult.publicId).catch(() => undefined);
       throw error;
     }
 
-    await this.prisma.driverProfile
-      .updateMany({
-        where: { userId },
-        data: { documentsUploaded: true, documentsUploadedAt: new Date() },
-      })
-      .catch((err) => {
-        this.logger.warn(`DriverProfile update échoué user=${userId}: ${err?.message || err}`);
-      });
+    await this.prisma.driverProfile.updateMany({
+      where: { userId },
+      data: { documentsUploaded: true, documentsUploadedAt: new Date() },
+    }).catch((err) => {
+      this.logger.warn(`DriverProfile update échoué user=${userId}: ${err?.message || err}`);
+    });
 
     return {
       success: true,
@@ -172,11 +147,7 @@ export class DocumentsService {
   async listPendingDocuments() {
     const docs = await this.prisma.document.findMany({
       where: { status: DocumentStatus.PENDING },
-      include: {
-        user: {
-          select: { id: true, email: true, firstName: true, role: true, accountStatus: true },
-        },
-      },
+      include: { user: { select: { id: true, email: true, firstName: true, role: true, accountStatus: true } } },
       orderBy: { uploadedAt: 'asc' },
     });
     return docs.map((d) => this.mapDoc(d));
@@ -208,11 +179,8 @@ export class DocumentsService {
   }
 
   async reviewDocument(params: {
-    documentId: string;
-    adminId: string;
-    status?: string;
-    approved?: boolean;
-    rejectionReason?: string;
+    documentId: string; adminId: string;
+    status?: string; approved?: boolean; rejectionReason?: string;
   }) {
     const { documentId, adminId, status, approved, rejectionReason } = params;
     const targetStatus = this.toDocStatus(status, approved);
@@ -226,10 +194,9 @@ export class DocumentsService {
         status: targetStatus,
         reviewedAt: new Date(),
         reviewedBy: adminId,
-        rejectionReason:
-          targetStatus === DocumentStatus.REJECTED
-            ? rejectionReason ?? 'Document non conforme'
-            : null,
+        rejectionReason: targetStatus === DocumentStatus.REJECTED
+          ? rejectionReason ?? 'Document non conforme'
+          : null,
       },
     });
 
@@ -237,19 +204,14 @@ export class DocumentsService {
 
     return {
       success: true,
-      message:
-        targetStatus === DocumentStatus.APPROVED
-          ? 'Document approuvé ✅'
-          : 'Document rejeté ❌',
+      message: targetStatus === DocumentStatus.APPROVED ? 'Document approuvé ✅' : 'Document rejeté ❌',
       document: reviewed,
     };
   }
 
   async decideDriverAccount(params: {
-    driverId: string;
-    adminId: string;
-    approved: boolean;
-    adminNotes?: string;
+    driverId: string; adminId: string;
+    approved: boolean; adminNotes?: string;
   }) {
     const { driverId, approved, adminNotes } = params;
 
@@ -301,7 +263,6 @@ export class DocumentsService {
       where: { id: userId },
       include: { driverProfile: true, documents: true },
     });
-
     if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
 
     const allApproved = this.hasAllRequired(user.documents);
@@ -320,7 +281,7 @@ export class DocumentsService {
         where: { id: userId },
         data: { accountStatus: 'ACTIVE', isActive: true, isVerified: true },
       });
-      this.logger.log(`[Driver ${userId}] ✅ Auto-activé (tous documents approuvés)`);
+      this.logger.log(`[Driver ${userId}] ✅ Auto-activé`);
     }
   }
 }

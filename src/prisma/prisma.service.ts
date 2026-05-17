@@ -19,10 +19,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         const plainPassword = process.env.ADMIN_PASSWORD || 'AdminKoogwe2026!';
         const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
-        await this.user.create({
+        const admin = await this.user.create({
           data: {
             email: adminEmail,
-            hashedPassword: hashedPassword,
+            hashedPassword,
             firstName: 'Super',
             lastName: 'Admin',
             role: 'ADMIN',
@@ -32,14 +32,29 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           },
         });
 
+        await this.wallet.create({ data: { userId: admin.id, balance: 0 } });
+
         this.logger.log(`✅ Premier administrateur créé : ${adminEmail}`);
         this.logger.log(`🔑 Mot de passe : ${plainPassword}`);
-        this.logger.warn('⚠️ Change ce mot de passe dès ta première connexion !');
       } else {
         this.logger.log('👤 Un administrateur existe déjà.');
       }
+
+      // 🔧 Crée un wallet pour tous les utilisateurs qui n'en ont pas
+      const usersWithoutWallet = await this.user.findMany({
+        where: { wallet: null },
+        select: { id: true },
+      });
+      if (usersWithoutWallet.length > 0) {
+        this.logger.log(`🔧 Création de ${usersWithoutWallet.length} wallets manquants…`);
+        await this.wallet.createMany({
+          data: usersWithoutWallet.map((u) => ({ userId: u.id, balance: 0 })),
+          skipDuplicates: true,
+        });
+        this.logger.log('✅ Wallets manquants créés.');
+      }
     } catch (error) {
-      this.logger.error('❌ Erreur lors de l\'initialisation de Prisma Service:', error);
+      this.logger.error('❌ Erreur init Prisma:', error);
     }
   }
 

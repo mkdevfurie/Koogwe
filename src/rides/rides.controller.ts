@@ -40,13 +40,11 @@ export class RidesController {
     return this.ridesService.getAvailableRides(req.user.id);
   }
 
-  // === Historique courses (alias /rides/history attendu par les apps) ===
   @Get('history')
   getHistory(@Request() req: any) {
     return this.ridesService.getUserRides(req.user.id);
   }
 
-  // === Stats chauffeur (alias /rides/driver/stats attendu par les apps) ===
   @Get('driver/stats')
   async getDriverStats(@Request() req: any) {
     const userId = req.user.id;
@@ -59,12 +57,7 @@ export class RidesController {
         where: { driverId: userId, status: 'COMPLETED' },
       }),
     ]);
-    return {
-      totalRides,
-      completed,
-      cancelled,
-      revenue: revenue._sum.finalPrice ?? 0,
-    };
+    return { totalRides, completed, cancelled, revenue: revenue._sum.finalPrice ?? 0 };
   }
 
   @Get('me')
@@ -72,27 +65,19 @@ export class RidesController {
     return this.ridesService.getUserRides(req.user.id);
   }
 
-  // === Détail d'une course par ID (utilisé par passager et chauffeur) ===
   @Get(':id')
   async getRideById(@Request() req: any, @Param('id') rideId: string) {
     const ride = await this.prisma.ride.findUnique({
       where: { id: rideId },
       include: {
         passenger: {
-          select: {
-            id: true, firstName: true, lastName: true, email: true,
-            phone: true, avatarUrl: true,
-          },
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true },
         },
         driver: {
           select: {
-            id: true, firstName: true, lastName: true, email: true,
-            phone: true, avatarUrl: true,
+            id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true,
             driverProfile: {
-              select: {
-                vehicleMake: true, vehicleModel: true,
-                vehicleColor: true, licensePlate: true, rating: true,
-              },
+              select: { vehicleMake: true, vehicleModel: true, vehicleColor: true, licensePlate: true, rating: true },
             },
           },
         },
@@ -100,7 +85,6 @@ export class RidesController {
       },
     });
     if (!ride) throw new NotFoundException('Course introuvable');
-
     if (ride.passengerId !== req.user.id && ride.driverId !== req.user.id && req.user.role !== 'ADMIN') {
       throw new NotFoundException('Course introuvable');
     }
@@ -121,7 +105,6 @@ export class RidesController {
     return this.ridesService.updateRideStatus(rideId, req.user.id, body.status, body.cancelReason);
   }
 
-  // === Annuler une course (alias) ===
   @Post(':id/cancel')
   cancelRide(@Request() req: any, @Param('id') rideId: string, @Body() body: { reason?: string }) {
     return this.ridesService.updateRideStatus(rideId, req.user.id, 'CANCELLED', body?.reason);
@@ -132,8 +115,6 @@ export class RidesController {
     return this.ridesService.verifyPin(rideId, req.user.id, body.pin);
   }
 
-  // === Notation : passager note le chauffeur OU chauffeur note le passager ===
-  // Compatible /rides/:id/review ET /rides/:id/rate (les deux apps utilisent différentes URLs)
   @Post(':id/review')
   reviewRide(
     @Request() req: any,
@@ -152,7 +133,6 @@ export class RidesController {
     return this.submitReview(req.user.id, rideId, body.rating, body.comment);
   }
 
-  /** Enregistre une note dans la course selon que le user est passager ou chauffeur */
   private async submitReview(userId: string, rideId: string, rating: number, comment?: string) {
     if (typeof rating !== 'number' || rating < 1 || rating > 5) {
       throw new BadRequestException('La note doit être entre 1 et 5');
@@ -166,24 +146,19 @@ export class RidesController {
 
     const isPassenger = ride.passengerId === userId;
     const isDriver = ride.driverId === userId;
-    if (!isPassenger && !isDriver) {
-      throw new NotFoundException('Course introuvable');
-    }
+    if (!isPassenger && !isDriver) throw new NotFoundException('Course introuvable');
 
     const data: any = {};
     if (isPassenger) {
-      // Le passager note le chauffeur
       data.driverRating = rating;
       if (comment) data.driverComment = comment;
     } else {
-      // Le chauffeur note le passager
       data.passengerRating = rating;
       if (comment) data.passengerComment = comment;
     }
 
     await this.prisma.ride.update({ where: { id: rideId }, data });
 
-    // Met à jour la moyenne du chauffeur si le passager le note
     if (isPassenger && ride.driverId) {
       const stats = await this.prisma.ride.aggregate({
         _avg: { driverRating: true },

@@ -1,9 +1,4 @@
 // src/rides/rides.service.ts
-// ✅ VERSION PRODUCTION
-//    Fix 1 : estimatedPrice calculé CÔTÉ SERVEUR (plus falsifiable par le client)
-//    Fix 2 : getAvailableRides filtré par distance GPS (géofencing 30 km par défaut)
-//    Fix 3 : acceptRide avec transaction atomique (évite double-accept concurrent)
-
 import {
   Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger,
 } from '@nestjs/common';
@@ -11,11 +6,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AppGateway } from '../common/websocket.gateway';
 import { MailService } from '../mail/mail.service';
 
-// ─── Moteur de tarification (identique au cahier des charges) ────────────────
 function calculatePrice(params: {
-  distanceKm: number;
-  durationMin: number;
-  vehicleType: string;
+  distanceKm: number; durationMin: number; vehicleType: string;
 }): number {
   const { distanceKm, durationMin, vehicleType } = params;
 
@@ -35,19 +27,17 @@ function calculatePrice(params: {
   const vt = vehicleType.toUpperCase();
   const tarifKm = TARIF_KM[vt] ?? TARIF_KM['ECO'];
 
-  // Heure courante → coefficient horaire
   const hour = new Date().getHours();
   let coeffHoraire = 1.0;
-  if (hour >= 7 && hour <= 9)   coeffHoraire = 1.3;  // Pointe matin
-  if (hour >= 17 && hour <= 20) coeffHoraire = 1.3;  // Pointe soir
-  if (hour >= 22 || hour <= 5)  coeffHoraire = 1.4;  // Nuit
+  if (hour >= 7 && hour <= 9)   coeffHoraire = 1.3;
+  if (hour >= 17 && hour <= 20) coeffHoraire = 1.3;
+  if (hour >= 22 || hour <= 5)  coeffHoraire = 1.4;
 
   const prixBase = PRISE_EN_CHARGE + distanceKm * tarifKm + durationMin * TARIF_MIN;
   const prixFinal = Math.max(prixBase * coeffHoraire, MINIMUM);
   return Math.round(prixFinal * 100) / 100;
 }
 
-// ─── Distance Haversine entre deux coords (en km) ────────────────────────────
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -60,6 +50,8 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+const VALID_VEHICLE_TYPES = ['MOTO', 'ECO', 'CONFORT', 'VAN', 'BERLINE', 'SUV', 'LUXE'];
+
 @Injectable()
 export class RidesService {
   private readonly logger = new Logger(RidesService.name);
@@ -70,16 +62,11 @@ export class RidesService {
     private mail: MailService,
   ) {}
 
-  // ─── PASSAGER : Créer une course ──────────────────────────────────────────
   async createRide(passengerId: string, data: any) {
-    // Validation basique des entrées
     if (isNaN(data.pickupLat) || isNaN(data.pickupLng) || isNaN(data.dropoffLat) || isNaN(data.dropoffLng)) {
       throw new BadRequestException('Coordonnées GPS invalides');
     }
 
-    // ✅ FIX : Le prix est calculé côté serveur, pas côté client
-    // Si Mapbox renvoie distance/durée depuis le front, on les utilise
-    // Sinon on estime à partir de la distance Haversine
     const distanceKm: number =
       typeof data.distanceKm === 'number' && data.distanceKm > 0
         ? data.distanceKm
@@ -88,9 +75,10 @@ export class RidesService {
     const durationMin: number =
       typeof data.durationMin === 'number' && data.durationMin > 0
         ? data.durationMin
-        : Math.round((distanceKm / 30) * 60); // Vitesse moyenne 30 km/h
+        : Math.round((distanceKm / 30) * 60);
 
-    const vehicleType = (data.vehicleType || 'ECO').toUpperCase();
+    let vehicleType = (data.vehicleType || 'ECO').toString().toUpperCase();
+    if (!VALID_VEHICLE_TYPES.includes(vehicleType)) vehicleType = 'ECO';
 
     const estimatedPrice = calculatePrice({ distanceKm, durationMin, vehicleType });
 
@@ -113,19 +101,17 @@ export class RidesService {
       },
     });
 
-    // Notifier tous les chauffeurs connectés (le filtre géo se fait dans getAvailableRides)
     this.gateway.server.emit('ride:new', {
-      id:             ride.id,
-      pickupAddress:  ride.pickupAddress,
+      id: ride.id,
+      pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
-      pickupLat:      ride.pickupLat,
-      pickupLng:      ride.pickupLng,
+      pickupLat: ride.pickupLat,
+      pickupLng: ride.pickupLng,
       estimatedPrice: ride.estimatedPrice,
-      vehicleType:    ride.vehicleType,
-      requestedAt:    ride.requestedAt,
+      vehicleType: ride.vehicleType,
+      requestedAt: ride.requestedAt,
     });
 
-    // Envoyer email de confirmation au passager
     const passenger = await this.prisma.user.findUnique({
       where: { id: passengerId },
       select: { email: true, firstName: true, language: true },
@@ -143,9 +129,7 @@ export class RidesService {
     return ride;
   }
 
-  // ─── CHAUFFEUR : Courses disponibles (avec filtre géographique) ───────────
   async getAvailableRides(driverId: string) {
-    // Récupérer la position actuelle du chauffeur
     const driverProfile = await this.prisma.driverProfile.findUnique({
       where: { userId: driverId },
       select: { currentLat: true, currentLng: true, vehicleType: true, adminApproved: true },
@@ -156,7 +140,10 @@ export class RidesService {
     }
 
     const allRequested = await this.prisma.ride.findMany({
-      where: { status: 'REQUESTED' },
+      where: {
+        status: 'REQUESTED',
+        ...(driverProfile.vehicleType ? { vehicleType: driverProfile.vehicleType } : {}),
+      },
       include: {
         passenger: {
           select: { firstName: true, lastName: true, avatarUrl: true, phone: true },
@@ -165,42 +152,33 @@ export class RidesService {
       orderBy: { requestedAt: 'desc' },
     });
 
-    // ✅ FIX : Filtre géographique si la position du chauffeur est connue
     if (driverProfile.currentLat && driverProfile.currentLng) {
       const radiusKm = Number(process.env.DRIVER_SEARCH_RADIUS_KM ?? 30);
       return allRequested.filter((ride) => {
         const dist = haversineKm(
           driverProfile.currentLat!,
           driverProfile.currentLng!,
-          ride.pickupLat,
-          ride.pickupLng,
+          ride.pickupLat, ride.pickupLng,
         );
         return dist <= radiusKm;
       });
     }
-
-    // Si pas de position connue → retourner toutes les courses (premier login)
     return allRequested;
   }
 
-  // ─── CHAUFFEUR : Accepter une course ──────────────────────────────────────
   async acceptRide(rideId: string, driverId: string) {
-    // ✅ FIX : Transaction atomique → impossible que 2 chauffeurs acceptent en même temps
     const updated = await this.prisma.$transaction(async (tx) => {
       const ride = await tx.ride.findUnique({ where: { id: rideId } });
       if (!ride) throw new NotFoundException('Course introuvable');
-      if (ride.status !== 'REQUESTED') throw new BadRequestException('Course déjà prise par un autre chauffeur');
+      if (ride.status !== 'REQUESTED') throw new BadRequestException('Course déjà prise');
 
       return tx.ride.update({
         where: { id: rideId },
         data: { driverId, status: 'ACCEPTED', acceptedAt: new Date() },
-        include: {
-          passenger: { select: { firstName: true, phone: true } },
-        },
+        include: { passenger: { select: { firstName: true, phone: true } } },
       });
     });
 
-    // Récupérer les infos chauffeur pour notifier le passager
     const driver = await this.prisma.user.findUnique({
       where: { id: driverId },
       select: {
@@ -214,22 +192,18 @@ export class RidesService {
       },
     });
 
-    // Notifier la room de la course
     this.gateway.server.to(`ride:${rideId}`).emit('ride:accepted', {
-      rideId,
-      driverId,
-      status: 'ACCEPTED',
+      rideId, driverId, status: 'ACCEPTED',
       driver: {
-        name:     `${driver?.firstName ?? ''} ${driver?.lastName ?? ''}`.trim(),
-        phone:    driver?.phone,
+        name: `${driver?.firstName ?? ''} ${driver?.lastName ?? ''}`.trim(),
+        phone: driver?.phone,
         avatarUrl: driver?.avatarUrl,
-        plate:    driver?.driverProfile?.licensePlate,
-        vehicle:  `${driver?.driverProfile?.vehicleColor ?? ''} ${driver?.driverProfile?.vehicleMake ?? ''} ${driver?.driverProfile?.vehicleModel ?? ''}`.trim(),
-        rating:   driver?.driverProfile?.rating,
+        plate: driver?.driverProfile?.licensePlate,
+        vehicle: `${driver?.driverProfile?.vehicleColor ?? ''} ${driver?.driverProfile?.vehicleMake ?? ''} ${driver?.driverProfile?.vehicleModel ?? ''}`.trim(),
+        rating: driver?.driverProfile?.rating,
       },
     });
 
-    // Envoyer email au passager avec infos chauffeur
     const passenger = await this.prisma.user.findUnique({
       where: { id: updated.passengerId },
       select: { email: true, language: true },
@@ -250,14 +224,12 @@ export class RidesService {
     return updated;
   }
 
-  // ─── Mise à jour du statut ────────────────────────────────────────────────
   async updateRideStatus(rideId: string, requesterId: string, status: string, cancelReason?: string) {
     const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Course introuvable');
 
-    // Vérification d'autorisation
     if (ride.passengerId !== requesterId && ride.driverId !== requesterId) {
-      throw new ForbiddenException('Non autorisé à modifier cette course');
+      throw new ForbiddenException('Non autorisé');
     }
 
     const updated = await this.prisma.ride.update({
@@ -265,7 +237,7 @@ export class RidesService {
       data: {
         status: status as any,
         cancelReason: cancelReason ?? null,
-        ...(status === 'COMPLETED' ? { completedAt: new Date() } : {}),
+        ...(status === 'COMPLETED' ? { completedAt: new Date(), finalPrice: ride.estimatedPrice } : {}),
         ...(status === 'CANCELLED' ? { cancelledAt: new Date() } : {}),
       },
     });
@@ -274,7 +246,6 @@ export class RidesService {
     return updated;
   }
 
-  // ─── Vérification PIN pour démarrer ───────────────────────────────────────
   async verifyPin(rideId: string, driverId: string, pin: string) {
     const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Course introuvable');
@@ -284,13 +255,12 @@ export class RidesService {
     return this.updateRideStatus(rideId, driverId, 'IN_PROGRESS');
   }
 
-  // ─── Historique utilisateur ───────────────────────────────────────────────
   async getUserRides(userId: string) {
     return this.prisma.ride.findMany({
       where: { OR: [{ passengerId: userId }, { driverId: userId }] },
       include: {
         passenger: { select: { id: true, firstName: true, avatarUrl: true } },
-        driver:    { select: { id: true, firstName: true, avatarUrl: true, driverProfile: { select: { rating: true, licensePlate: true } } } },
+        driver: { select: { id: true, firstName: true, avatarUrl: true, driverProfile: { select: { rating: true, licensePlate: true } } } },
       },
       orderBy: { requestedAt: 'desc' },
       take: 50,

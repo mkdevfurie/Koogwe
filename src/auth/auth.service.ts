@@ -122,6 +122,17 @@ export class AuthService {
 
     if (isNewUser) {
       await this.mail.sendWelcome(normalizedEmail, user.firstName ?? 'là', user.language);
+
+      // 🔧 FIX : créer le wallet pour ce nouvel utilisateur (sinon /wallet/* plante)
+      try {
+        await this.prisma.wallet.upsert({
+          where: { userId: updatedUser.id },
+          create: { userId: updatedUser.id, balance: 0 },
+          update: {},
+        });
+      } catch (e: any) {
+        this.logger.warn(`Wallet création échouée ${updatedUser.id}: ${e?.message || e}`);
+      }
     }
 
     const tokens = await this.generateTokens(updatedUser.id, updatedUser.email, updatedUser.role);
@@ -164,6 +175,13 @@ export class AuthService {
 
     const valid = await bcrypt.compare(password, user.hashedPassword);
     if (!valid) throw new UnauthorizedException('Email ou mot de passe incorrect');
+
+    // 🔧 FIX : s'assurer que le wallet existe (rétrocompatibilité)
+    await this.prisma.wallet.upsert({
+      where: { userId: user.id },
+      create: { userId: user.id, balance: 0 },
+      update: {},
+    }).catch(() => undefined);
 
     const tokens = await this.generateTokens(user.id, user.email, user.role);
     await this.prisma.user.update({ where: { id: user.id }, data: { refreshToken: tokens.refreshToken } });

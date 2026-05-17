@@ -1,5 +1,8 @@
 // src/drivers/drivers.controller.ts
-import { Controller, Get, Post, Patch, Body, Req, Query, Param, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import {
+  Controller, Get, Post, Patch, Body, Req, Query, Param,
+  UseGuards, UseInterceptors, UploadedFile, BadRequestException,
+} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { DriversService } from './drivers.service';
@@ -18,9 +21,6 @@ export class DriversController {
     private readonly cloudinary: CloudinaryService,
   ) {}
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // PROFIL CHAUFFEUR
-  // ─────────────────────────────────────────────────────────────────────────
   @Post('profile')
   @ApiOperation({ summary: 'Créer ou mettre à jour le profil chauffeur' })
   createProfile(@Req() req: any, @Body() dto: any) {
@@ -33,57 +33,34 @@ export class DriversController {
     return this.driversService.getProfile(req.user.id);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // VÉRIFICATION FACIALE
-  // ─────────────────────────────────────────────────────────────────────────
-  @Post('verify-face')
-  @ApiOperation({ summary: 'Vérification faciale du chauffeur (selfie)' })
-  async verifyFace(@Req() req: any, @Body() body: { imageBase64: string }) {
-    if (!body.imageBase64) {
-      return { success: false, message: 'Image base64 requise' };
-    }
-    return this.faceVerificationService.verifyFace(req.user.id, body.imageBase64);
-  }
-
+  // 🔧 FIX : route /verify-face supprimée (doublon avec FaceVerificationController)
   @Get('face-status')
-  @ApiOperation({ summary: 'Récupérer le statut de vérification faciale' })
+  @ApiOperation({ summary: 'Statut vérification faciale' })
   async getFaceStatus(@Req() req: any) {
     return this.faceVerificationService.getFaceVerificationStatus(req.user.id);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DISPONIBILITÉ & LOCALISATION
-  // ─────────────────────────────────────────────────────────────────────────
   @Patch('availability')
-  @ApiOperation({ summary: 'Passer en ligne / hors ligne' })
   updateAvailability(@Req() req: any, @Body() dto: any) {
     return this.driversService.updateAvailability(req.user.id, dto);
   }
 
   @Patch('location')
-  @ApiOperation({ summary: 'Mettre à jour la position GPS' })
   updateLocation(@Req() req: any, @Body() dto: any) {
     return this.driversService.updateLocation(req.user.id, dto);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // STATISTIQUES & HISTORIQUE
-  // ─────────────────────────────────────────────────────────────────────────
   @Get('stats')
-  @ApiOperation({ summary: 'Statistiques et gains du chauffeur' })
   getStats(@Req() req: any) {
     return this.driversService.getStats(req.user.id);
   }
 
   @Get('rides')
-  @ApiOperation({ summary: 'Historique des courses du chauffeur' })
   getRides(@Req() req: any, @Query('page') page = '1', @Query('limit') limit = '10') {
     return this.driversService.getRideHistory(req.user.id, +page, +limit);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DOCUMENTS
-  // ─────────────────────────────────────────────────────────────────────────
+  // 🔧 FIX : utilise file.buffer (mémoire) au lieu de file.path
   @Post('documents')
   @ApiOperation({ summary: 'Enregistrer un document (multipart file)' })
   @UseInterceptors(FileInterceptor('file'))
@@ -93,26 +70,27 @@ export class DriversController {
     @UploadedFile() file: Express.Multer.File,
   ) {
     const userId = req.user.id;
-    // Si c'est un fichier uploadé, l'envoyer vers Cloudinary
-    if (file) {
+    if (!type) throw new BadRequestException('Type de document requis');
+
+    if (file?.buffer) {
+      if (file.buffer.byteLength > 8 * 1024 * 1024) {
+        throw new BadRequestException('Fichier trop volumineux (max 8MB)');
+      }
       const result = await this.cloudinary.uploadImage(
-        file.path,
+        file.buffer,
         `koogwe/documents/${userId}/${type}`,
       );
       return this.driversService.uploadDocument(userId, type, result.url);
     }
-    // Sinon accepter aussi fileUrl (compatibilité)
-    const { fileUrl } = req.body;
+
+    const fileUrl = (req.body as any)?.fileUrl;
+    if (!fileUrl) throw new BadRequestException('Aucun fichier fourni');
     return this.driversService.uploadDocument(userId, type, fileUrl);
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // ROUTES ADMIN SEULEMENT
-  // ─────────────────────────────────────────────────────────────────────────
   @Get('admin/pending')
   @Roles('ADMIN')
   @UseGuards(RolesGuard)
-  @ApiOperation({ summary: '[ADMIN] Liste des chauffeurs en attente' })
   getPendingDrivers() {
     return this.driversService.getPendingDrivers();
   }
@@ -120,7 +98,6 @@ export class DriversController {
   @Patch('admin/:id/approve')
   @Roles('ADMIN')
   @UseGuards(RolesGuard)
-  @ApiOperation({ summary: '[ADMIN] Approuver un chauffeur' })
   approveDriver(@Param('id') id: string) {
     return this.driversService.approveDriver(id);
   }
@@ -128,7 +105,6 @@ export class DriversController {
   @Patch('admin/:id/reject')
   @Roles('ADMIN')
   @UseGuards(RolesGuard)
-  @ApiOperation({ summary: '[ADMIN] Rejeter un chauffeur' })
   rejectDriver(@Param('id') id: string, @Body('reason') reason?: string) {
     return this.driversService.rejectDriver(id, reason);
   }
