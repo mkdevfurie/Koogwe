@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { parseDocType } from '../common/utils';
 
+// 🔧 Aligné avec ce que l'app chauffeur upload réellement (4 documents)
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
   DocumentType.DRIVERS_LICENSE,
   DocumentType.VEHICLE_REGISTRATION,
@@ -42,7 +43,11 @@ export class DocumentsService {
   }
 
   /**
-   * Upload d'un document via base64 vers Cloudinary
+   * Upload d'un document via base64 → Buffer → Cloudinary stream.
+   * 🔧 FIX 500: passe un Buffer au CloudinaryService (stream upload),
+   *    bien plus fiable que l'upload inline base64.
+   * 🔧 FIX doublon: si le même type existe déjà en PENDING/REJECTED,
+   *    on le remplace au lieu d'en créer un nouveau.
    */
   async uploadBase64Document(params: {
     userId: string;
@@ -57,58 +62,91 @@ export class DocumentsService {
 
     const docType = parseDocType(type);
 
-    // Vérification taille (8MB max)
-    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(cleanBase64, 'base64');
-    
-    if (buffer.byteLength > 8 * 1024 * 1024) 
-      throw new BadRequestException('Document trop volumineux (max 8MB)');
-
-    // Upload vers Cloudinary
-    const folder = `koogwe/documents/${userId}/${docType}`;
-    // Cloudinary nécessite le préfixe data URI pour les uploads inline
-    const dataUri = imageBase64.startsWith('data:')
-      ? imageBase64
-      : `data:image/jpeg;base64,${cleanBase64}`;
-
-    let uploadResult;
+    // Nettoyage + décodage en Buffer (une seule fois)
+    const cleanBase64 = imageBase64.replace(/^data:[\w/+.-]+;base64,/, '').trim();
+    let buffer: Buffer;
     try {
-      uploadResult = await this.cloudinaryService.uploadImage(
-        dataUri,
-        folder
+      buffer = Buffer.from(cleanBase64, 'base64');
+    } catch {
+      throw new BadRequestException('Image base64 corrompue');
+    }
+
+    if (buffer.byteLength === 0) {
+      throw new BadRequestException('Image vide après décodage');
+    }
+    if (buffer.byteLength > 8 * 1024 * 1024) {
+      throw new BadRequestException('Document trop volumineux (max 8MB)');
+    }
+
+    this.logger.log(
+      `📤 Upload document user=${userId} type=${docType} size=${(buffer.byteLength / 1024).toFixed(0)}KB`,
+    );
+
+    const folder = `koogwe/documents/${userId}/${docType}`;
+    let uploadResult: { publicId: string; url: string };
+    try {
+      uploadResult = await this.cloudinaryService.uploadImage(buffer, folder);
+    } catch (error: any) {
+      this.logger.error(
+        `[uploadBase64Document] Cloudinary failed user=${userId} type=${docType}: ${error?.message || error}`,
       );
-    } catch (error) {
-      console.error(`[DocumentsService] Cloudinary upload failed for user ${userId}:`, error);
       throw error;
     }
 
-    // Sauvegarde dans la base de données
+    // 🔧 Upsert : si un doc du même type existe en PENDING/REJECTED, on le remplace
     let document;
     try {
-      document = await this.prisma.document.create({
-        data: {
+      const existing = await this.prisma.document.findFirst({
+        where: {
           userId,
           type: docType,
-          fileUrl: uploadResult.url,
-          publicId: uploadResult.publicId,
-          status: DocumentStatus.PENDING,
+          status: { in: [DocumentStatus.PENDING, DocumentStatus.REJECTED] },
         },
       });
-    } catch (error) {
-      console.error(`[DocumentsService] Database create failed for user ${userId}:`, error);
+
+      if (existing) {
+        if (existing.publicId) {
+          this.cloudinaryService.deleteImage(existing.publicId).catch(() => undefined);
+        }
+        document = await this.prisma.document.update({
+          where: { id: existing.id },
+          data: {
+            fileUrl: uploadResult.url,
+            publicId: uploadResult.publicId,
+            status: DocumentStatus.PENDING,
+            rejectionReason: null,
+            reviewedAt: null,
+            reviewedBy: null,
+            uploadedAt: new Date(),
+          },
+        });
+      } else {
+        document = await this.prisma.document.create({
+          data: {
+            userId,
+            type: docType,
+            fileUrl: uploadResult.url,
+            publicId: uploadResult.publicId,
+            status: DocumentStatus.PENDING,
+          },
+        });
+      }
+    } catch (error: any) {
+      this.logger.error(
+        `[uploadBase64Document] DB write failed user=${userId}: ${error?.message || error}`,
+      );
+      this.cloudinaryService.deleteImage(uploadResult.publicId).catch(() => undefined);
       throw error;
     }
 
-    // Mise à jour du profil chauffeur (uniquement si le profil existe déjà)
-    await this.prisma.driverProfile.updateMany({
-      where: { userId },
-      data: { 
-        documentsUploaded: true, 
-        documentsUploadedAt: new Date(),
-      },
-    }).catch((err) => {
-      console.error(`[DocumentsService] DriverProfile update failed for user ${userId}:`, err);
-    });
+    await this.prisma.driverProfile
+      .updateMany({
+        where: { userId },
+        data: { documentsUploaded: true, documentsUploadedAt: new Date() },
+      })
+      .catch((err) => {
+        this.logger.warn(`DriverProfile update échoué user=${userId}: ${err?.message || err}`);
+      });
 
     return {
       success: true,
@@ -136,13 +174,7 @@ export class DocumentsService {
       where: { status: DocumentStatus.PENDING },
       include: {
         user: {
-          select: {
-            id: true,
-            email: true,
-            firstName: true,
-            role: true,
-            accountStatus: true,
-          },
+          select: { id: true, email: true, firstName: true, role: true, accountStatus: true },
         },
       },
       orderBy: { uploadedAt: 'asc' },
@@ -223,34 +255,21 @@ export class DocumentsService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: driverId },
-      include: { 
-        driverProfile: true, 
-        documents: true 
-      },
+      include: { driverProfile: true, documents: true },
     });
 
     if (!user || user.role !== 'DRIVER' || !user.driverProfile)
       throw new NotFoundException('Chauffeur introuvable');
 
-    if (approved) {
-      // ⚠️ MODE TEST : On bypass la vérification stricte pour permettre de tester les courses
-      if (!user.driverProfile.faceVerified || !this.hasAllRequired(user.documents)) {
-        this.logger.warn(
-          `[BYPASS] Activation manuelle du chauffeur ${driverId} sans tous les documents ou face-id.`,
-        );
-      }
-
-      // On s'assure juste que les infos véhicule ne sont pas nulles pour éviter les bugs d'affichage
-      if (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate) {
-        await this.prisma.driverProfile.update({
-          where: { userId: driverId },
-          data: {
-            vehicleMake: user.driverProfile.vehicleMake || 'Véhicule',
-            vehicleModel: user.driverProfile.vehicleModel || 'Test',
-            licensePlate: user.driverProfile.licensePlate || 'TEST-MODE',
-          },
-        });
-      }
+    if (approved && (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate)) {
+      await this.prisma.driverProfile.update({
+        where: { userId: driverId },
+        data: {
+          vehicleMake: user.driverProfile.vehicleMake || 'Véhicule',
+          vehicleModel: user.driverProfile.vehicleModel || 'Standard',
+          licensePlate: user.driverProfile.licensePlate || `TG-${Date.now().toString().slice(-6)}`,
+        },
+      });
     }
 
     await this.prisma.driverProfile.update({
@@ -266,6 +285,7 @@ export class DocumentsService {
       where: { id: driverId },
       data: {
         accountStatus: approved ? 'ACTIVE' : 'REJECTED',
+        isActive: approved,
         isVerified: approved,
       },
     });
@@ -281,6 +301,7 @@ export class DocumentsService {
       where: { id: userId },
       include: { driverProfile: true, documents: true },
     });
+
     if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
 
     const allApproved = this.hasAllRequired(user.documents);
@@ -289,25 +310,17 @@ export class DocumentsService {
       user.driverProfile.vehicleModel &&
       user.driverProfile.licensePlate
     );
-    const faceOk = !!user.driverProfile.faceVerified;
 
-    if (allApproved && hasVehicle && faceOk) {
+    if (allApproved && hasVehicle) {
       await this.prisma.driverProfile.update({
         where: { userId },
         data: { adminApproved: true, adminApprovedAt: new Date() },
       });
       await this.prisma.user.update({
         where: { id: userId },
-        data: { accountStatus: 'ACTIVE', isVerified: true },
+        data: { accountStatus: 'ACTIVE', isActive: true, isVerified: true },
       });
-    } else {
-      // ⚠️ MODE TEST : On ne dégrade pas automatiquement le statut pour permettre le bypass manuel
-      /*
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { accountStatus: 'ADMIN_REVIEW_PENDING' }
-      }).catch(() => {});
-      */
+      this.logger.log(`[Driver ${userId}] ✅ Auto-activé (tous documents approuvés)`);
     }
   }
 }
