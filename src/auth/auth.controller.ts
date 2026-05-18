@@ -11,14 +11,27 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
-import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, AdminLoginDto } from './dto/auth.dto';
+import {
+  SendOtpDto,
+  VerifyOtpDto,
+  VerifyOtpAndPasswordDto,
+  RefreshTokenDto,
+  AdminLoginDto,
+  LoginPasswordDto,
+} from './dto/auth.dto';
 import { Public } from './guards/jwt-auth.guard';
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly jwtService: JwtService,
+    private readonly config: ConfigService,
+  ) {}
 
   @Public()
   @Post('send-otp')
@@ -44,17 +57,17 @@ export class AuthController {
   @Public()
   @Post('verify-otp-and-password')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Vérifie OTP (alias chauffeur) — redirige vers verify-otp' })
-  async verifyOtpAndPassword(@Body() body: { email: string; code: string; password?: string }) {
-    return this.authService.verifyOtp({ email: body.email, code: body.code });
+  @ApiOperation({ summary: 'Vérifie OTP et enregistre le mot de passe' })
+  async verifyOtpAndPassword(@Body() dto: VerifyOtpAndPasswordDto) {
+    return this.authService.verifyOtpAndSetPassword(dto);
   }
 
   @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Connexion email + mot de passe' })
-  async login(@Body() body: { email: string; password: string }) {
-    return this.authService.loginWithPassword(body.email, body.password);
+  async login(@Body() dto: LoginPasswordDto) {
+    return this.authService.loginWithPassword(dto.email, dto.password);
   }
 
   @Public()
@@ -73,13 +86,13 @@ export class AuthController {
   @ApiOperation({ summary: 'Renouvelle les tokens JWT via le refresh token' })
   async refresh(@Body() dto: RefreshTokenDto) {
     try {
-      if (!dto.refreshToken || !dto.refreshToken.includes('.')) {
+      if (!dto.refreshToken) {
         throw new BadRequestException('Refresh token invalide');
       }
-      const payload = JSON.parse(
-        Buffer.from(dto.refreshToken.split('.')[1], 'base64').toString(),
-      );
-      if (!payload || !payload.sub) {
+      const payload = await this.jwtService.verifyAsync(dto.refreshToken, {
+        secret: this.config.get<string>('JWT_REFRESH_SECRET'),
+      });
+      if (!payload?.sub) {
         throw new BadRequestException('Payload du refresh token invalide');
       }
       return this.authService.refreshTokens(payload.sub, dto.refreshToken);

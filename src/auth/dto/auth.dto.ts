@@ -24,6 +24,33 @@ export class VerifyOtpDto {
   code: string;
 }
 
+export class VerifyOtpAndPasswordDto {
+  @ApiProperty({ example: 'jean.dupont@email.com' })
+  @IsEmail({}, { message: 'Adresse email invalide' })
+  email: string;
+
+  @ApiProperty({ example: '482910' })
+  @IsString()
+  @Length(6, 6, { message: 'Le code OTP doit contenir exactement 6 chiffres' })
+  code: string;
+
+  @ApiProperty({ example: 'MonMotDePasse123!' })
+  @IsString()
+  @MinLength(8, { message: 'Le mot de passe doit contenir au moins 8 caractères' })
+  password: string;
+}
+
+export class LoginPasswordDto {
+  @ApiProperty({ example: 'jean.dupont@email.com' })
+  @IsEmail({}, { message: 'Adresse email invalide' })
+  email: string;
+
+  @ApiProperty()
+  @IsString()
+  @MinLength(6)
+  password: string;
+}
+
 export class RefreshTokenDto {
   @ApiProperty()
   @IsString()

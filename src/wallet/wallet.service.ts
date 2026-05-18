@@ -1,7 +1,8 @@
 // src/wallet/wallet.service.ts
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { Ride } from '@prisma/client';
 
 @Injectable()
 export class WalletService {
@@ -11,6 +12,74 @@ export class WalletService {
     private prisma: PrismaService,
     private mailService: MailService,
   ) {}
+
+  private isProduction(): boolean {
+    return process.env.NODE_ENV === 'production';
+  }
+
+  private driverShare(amount: number): number {
+    const rate = Number(process.env.PLATFORM_COMMISSION_RATE ?? 0.2);
+    return amount * (1 - rate);
+  }
+
+  private assertStripeConfigured(): void {
+    if (this.isProduction() && !process.env.STRIPE_SECRET_KEY) {
+      throw new BadRequestException('Paiements Stripe non configurés en production');
+    }
+  }
+
+  private assertNotMockPayment(stripeMethodId?: string, paymentIntentId?: string): void {
+    if (!this.isProduction()) return;
+    if (stripeMethodId?.startsWith('pm_mock_')) {
+      throw new BadRequestException('Méthode de paiement mock interdite en production');
+    }
+    if (paymentIntentId?.startsWith('pi_mock_')) {
+      throw new BadRequestException('Intent de paiement mock interdit en production');
+    }
+  }
+
+  /**
+   * Montant facturable côté serveur pour une course.
+   * @param requireParticipant si true, l'utilisateur doit être passager ou chauffeur de la course
+   */
+  async resolveChargeAmount(
+    rideId: string,
+    userId: string,
+    options?: {
+      requireParticipant?: boolean;
+      allowUnpaidOnly?: boolean;
+      allowDriverPreAccept?: boolean;
+    },
+  ): Promise<{ ride: Ride; amount: number }> {
+    const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
+    if (!ride) throw new BadRequestException('Course introuvable');
+
+    let isAuthorized =
+      ride.passengerId === userId || ride.driverId === userId;
+
+    if (!isAuthorized && options?.allowDriverPreAccept && ride.status === 'REQUESTED') {
+      const driverProfile = await this.prisma.driverProfile.findUnique({
+        where: { userId },
+        select: { adminApproved: true },
+      });
+      isAuthorized = !!driverProfile?.adminApproved;
+    }
+
+    if (options?.requireParticipant !== false && !isAuthorized) {
+      throw new ForbiddenException('Non autorisé pour cette course');
+    }
+
+    if (options?.allowUnpaidOnly !== false && ride.isPaid) {
+      throw new BadRequestException('Cette course est déjà payée');
+    }
+
+    const amount = ride.finalPrice ?? ride.estimatedPrice;
+    if (!amount || amount <= 0) {
+      throw new BadRequestException('Montant de course invalide');
+    }
+
+    return { ride, amount };
+  }
 
   async getBalance(userId: string): Promise<{ balance: number }> {
     const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
@@ -32,19 +101,28 @@ export class WalletService {
     }
   }
 
-  async payRideFromWallet(userId: string, rideId: string, amount: number): Promise<{ success: boolean; message: string }> {
+  async payRideFromWallet(userId: string, rideId: string, amount?: number): Promise<{ success: boolean; message: string }> {
     try {
+      const { ride, amount: resolved } = await this.resolveChargeAmount(rideId, userId);
+      if (ride.passengerId !== userId) {
+        return { success: false, message: 'Seul le passager peut payer depuis le wallet' };
+      }
+      if (amount != null && Math.abs(amount - resolved) > 0.01) {
+        return { success: false, message: 'Montant invalide' };
+      }
+      amount = resolved;
+
       const wallet = await this.prisma.wallet.findUnique({ where: { userId } });
       if (!wallet || wallet.balance < amount) return { success: false, message: 'Solde insuffisant' };
 
-      const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
-      if (!ride || !ride.driverId) return { success: false, message: 'Course introuvable' };
+      if (!ride.driverId) return { success: false, message: 'Course introuvable' };
 
+      const share = this.driverShare(amount);
       await this.prisma.$transaction([
         this.prisma.wallet.update({ where: { userId }, data: { balance: { decrement: amount } } }),
-        this.prisma.wallet.update({ where: { userId: ride.driverId }, data: { balance: { increment: amount * 0.8 } } }),
+        this.prisma.wallet.update({ where: { userId: ride.driverId }, data: { balance: { increment: share } } }),
         this.prisma.transaction.create({ data: { userId, type: 'PAYMENT', amount: -amount, status: 'COMPLETED', rideId, paymentMethod: 'WALLET' } }),
-        this.prisma.transaction.create({ data: { userId: ride.driverId, type: 'RECHARGE', amount: amount * 0.8, status: 'COMPLETED', rideId, paymentMethod: 'WALLET' } }),
+        this.prisma.transaction.create({ data: { userId: ride.driverId, type: 'RECHARGE', amount: share, status: 'COMPLETED', rideId, paymentMethod: 'WALLET' } }),
         this.prisma.ride.update({ where: { id: rideId }, data: { isPaid: true } }),
       ]);
 
@@ -55,10 +133,105 @@ export class WalletService {
     }
   }
 
-  async recordCashPayment(userId: string, rideId: string, amount: number): Promise<{ success: boolean; message: string }> {
+  async payRideFromCard(userId: string, rideId: string, amount?: number): Promise<{ success: boolean; message: string }> {
     try {
-      const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
-      if (!ride || ride.passengerId !== userId) return { success: false, message: 'Course introuvable ou non autorisée' };
+      const { ride, amount: resolved } = await this.resolveChargeAmount(rideId, userId);
+      if (ride.passengerId !== userId) {
+        return { success: false, message: 'Seul le passager peut payer par carte' };
+      }
+      if (amount != null && Math.abs(amount - resolved) > 0.01) {
+        return { success: false, message: 'Montant invalide' };
+      }
+      amount = resolved;
+
+      if (!ride.driverId) return { success: false, message: 'Course introuvable' };
+
+      const card = await this.prisma.savedCard.findFirst({ where: { userId } });
+      if (!card) return { success: false, message: 'Aucune carte bancaire enregistrée' };
+
+      this.assertNotMockPayment(card.stripeMethodId);
+
+      const stripeKey = process.env.STRIPE_SECRET_KEY;
+      let transactionRef = `pi_card_${Date.now()}`;
+
+      if (stripeKey) {
+        try {
+          const stripe = require('stripe')(stripeKey);
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount: Math.round(amount * 100),
+            currency: 'eur',
+            payment_method: card.stripeMethodId,
+            confirm: true,
+            off_session: true,
+            metadata: { rideId, userId },
+          });
+          if (paymentIntent.status !== 'succeeded') {
+            return { success: false, message: `Paiement Stripe échoué : ${paymentIntent.status}` };
+          }
+          transactionRef = paymentIntent.id;
+        } catch (e) {
+          this.logger.error(`Stripe payment failed for ride ${rideId}: ${(e as any).message}`, (e as any).stack);
+          return { success: false, message: `Erreur Stripe : ${(e as any).message}` };
+        }
+      } else if (this.isProduction()) {
+        return { success: false, message: 'Stripe non configuré' };
+      }
+
+      const share = this.driverShare(amount);
+      await this.prisma.$transaction([
+        this.prisma.wallet.update({ where: { userId: ride.driverId }, data: { balance: { increment: share } } }),
+        this.prisma.transaction.create({ data: { userId, type: 'PAYMENT', amount: -amount, status: 'COMPLETED', rideId, paymentMethod: 'CARD', reference: transactionRef } }),
+        this.prisma.transaction.create({ data: { userId: ride.driverId, type: 'RECHARGE', amount: share, status: 'COMPLETED', rideId, paymentMethod: 'CARD', reference: transactionRef } }),
+        this.prisma.ride.update({ where: { id: rideId }, data: { isPaid: true } }),
+      ]);
+
+      return { success: true, message: 'Paiement par carte réussi et commission reversée' };
+    } catch (error) {
+      this.logger.error('Erreur paiement carte:', error);
+      return { success: false, message: 'Erreur lors du paiement par carte' };
+    }
+  }
+
+  async payRideFromPaypal(userId: string, rideId: string, amount?: number): Promise<{ success: boolean; message: string }> {
+    try {
+      const { ride, amount: resolved } = await this.resolveChargeAmount(rideId, userId);
+      if (ride.passengerId !== userId) {
+        return { success: false, message: 'Seul le passager peut payer via PayPal' };
+      }
+      if (amount != null && Math.abs(amount - resolved) > 0.01) {
+        return { success: false, message: 'Montant invalide' };
+      }
+      amount = resolved;
+
+      if (!ride.driverId) return { success: false, message: 'Course introuvable' };
+
+      const transactionRef = `paypal_${Date.now()}`;
+      const share = this.driverShare(amount);
+
+      await this.prisma.$transaction([
+        this.prisma.wallet.update({ where: { userId: ride.driverId }, data: { balance: { increment: share } } }),
+        this.prisma.transaction.create({ data: { userId, type: 'PAYMENT', amount: -amount, status: 'COMPLETED', rideId, paymentMethod: 'CARD', reference: transactionRef, externalRef: 'PayPal Payment' } }),
+        this.prisma.transaction.create({ data: { userId: ride.driverId, type: 'RECHARGE', amount: share, status: 'COMPLETED', rideId, paymentMethod: 'CARD', reference: transactionRef, externalRef: 'PayPal Payment' } }),
+        this.prisma.ride.update({ where: { id: rideId }, data: { isPaid: true } }),
+      ]);
+
+      return { success: true, message: 'Paiement PayPal enregistré avec succès et commission reversée' };
+    } catch (error) {
+      this.logger.error('Erreur paiement PayPal:', error);
+      return { success: false, message: 'Erreur lors du paiement PayPal' };
+    }
+  }
+
+  async recordCashPayment(userId: string, rideId: string, amount?: number): Promise<{ success: boolean; message: string }> {
+    try {
+      const { ride, amount: resolved } = await this.resolveChargeAmount(rideId, userId);
+      if (ride.passengerId !== userId && ride.driverId !== userId) {
+        return { success: false, message: 'Course introuvable ou non autorisée' };
+      }
+      if (amount != null && Math.abs(amount - resolved) > 0.01) {
+        return { success: false, message: 'Montant invalide' };
+      }
+      amount = resolved;
 
       await this.prisma.$transaction([
         this.prisma.transaction.create({ data: { userId, type: 'PAYMENT', amount: -amount, status: 'COMPLETED', rideId, paymentMethod: 'CASH' } }),
@@ -102,9 +275,9 @@ export class WalletService {
 
   // ✅ FIX V1: Stripe intent avec userId bien propagé en mode mock
   async createRechargeIntent(userId: string, amount: number): Promise<{ clientSecret: string; paymentIntentId: string }> {
+    this.assertStripeConfigured();
     const stripeKey = process.env.STRIPE_SECRET_KEY;
     if (!stripeKey) {
-      // Mode dev: mock avec userId intégré dans la référence
       const mockId = `pi_mock_${userId}_${Date.now()}`;
       return { clientSecret: `${mockId}_secret_mock`, paymentIntentId: mockId };
     }
@@ -124,6 +297,7 @@ export class WalletService {
 
   // ✅ FIX V1: confirmRechargeIntent — userId toujours résolu, jamais vide en mock
   async confirmRechargeIntent(paymentIntentId: string, userId?: string): Promise<{ success: boolean; balance: number }> {
+    this.assertNotMockPayment(undefined, paymentIntentId);
     const stripeKey = process.env.STRIPE_SECRET_KEY;
     let amount = 0;
     let resolvedUserId = userId ?? '';
@@ -140,7 +314,9 @@ export class WalletService {
         throw new Error(`Stripe confirm error: ${(e as any).message}`);
       }
     } else {
-      // Mode mock — extraire userId du mockId
+      if (this.isProduction()) {
+        throw new BadRequestException('Paiement mock interdit en production');
+      }
       const parts = paymentIntentId.split('_');
       if (parts.length >= 3 && !resolvedUserId) resolvedUserId = parts[2];
       amount = 10;
@@ -168,8 +344,60 @@ export class WalletService {
   }
 
   // ── GESTION DES CARTES ─────────────────────────────────────────────────────
+  async authorizeRidePayment(
+    userId: string,
+    rideId: string,
+    paymentMethod?: string,
+  ): Promise<{ success: boolean; message: string; status: string; transactionId: string; clientSecret?: string }> {
+    const { ride, amount } = await this.resolveChargeAmount(rideId, userId, {
+      allowUnpaidOnly: true,
+      allowDriverPreAccept: true,
+    });
+
+    const method = (paymentMethod || ride.paymentMethod || 'CASH').toUpperCase();
+    if (method === 'CASH') {
+      return {
+        success: true,
+        message: 'Paiement espèces — autorisation non requise',
+        status: 'AUTHORIZED',
+        transactionId: `cash_${rideId}`,
+      };
+    }
+
+    this.assertStripeConfigured();
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey) {
+      if (this.isProduction()) {
+        throw new BadRequestException('Stripe non configuré');
+      }
+      return {
+        success: true,
+        message: 'Paiement autorisé (mode dev)',
+        status: 'AUTHORIZED',
+        transactionId: `auth_dev_${Date.now()}`,
+      };
+    }
+
+    const stripe = require('stripe')(stripeKey);
+    const intent = await stripe.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency: 'eur',
+      capture_method: 'manual',
+      metadata: { rideId, userId, passengerId: ride.passengerId },
+    });
+
+    return {
+      success: true,
+      message: 'Paiement autorisé',
+      status: 'AUTHORIZED',
+      transactionId: intent.id,
+      clientSecret: intent.client_secret,
+    };
+  }
+
   async saveCard(userId: string, stripeMethodId: string) {
     try {
+      this.assertNotMockPayment(stripeMethodId);
       const stripeKey = process.env.STRIPE_SECRET_KEY;
       if (!stripeKey) throw new Error('Stripe not configured');
       const stripe = require('stripe')(stripeKey);

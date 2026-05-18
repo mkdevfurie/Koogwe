@@ -1,5 +1,5 @@
 // src/wallet/wallet.controller.ts
-import { Controller, Post, Get, Body, Param, Req } from '@nestjs/common';
+import { Controller, Post, Get, Body, Req } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { WalletService } from './wallet.service';
 
@@ -15,24 +15,13 @@ export class WalletController {
     return this.walletService.getBalance(req.user.id);
   }
 
-  @Get('balance/:userId')
-  getBalanceById(@Param('userId') userId: string) {
-    return this.walletService.getBalance(userId);
-  }
-
-  @Post('recharge')
-  @ApiOperation({ summary: 'Recharge manuelle (admin)' })
-  recharge(@Req() req: any, @Body() dto: { amount: number }) {
-    return this.walletService.rechargeManual(req.user.id, dto.amount);
-  }
-
   @Post('pay-ride')
-  payRide(@Req() req: any, @Body() dto: { rideId: string; amount: number }) {
+  payRide(@Req() req: any, @Body() dto: { rideId: string; amount?: number }) {
     return this.walletService.payRideFromWallet(req.user.id, dto.rideId, dto.amount);
   }
 
   @Post('record-cash')
-  recordCash(@Req() req: any, @Body() dto: { rideId: string; amount: number }) {
+  recordCash(@Req() req: any, @Body() dto: { rideId: string; amount?: number }) {
     return this.walletService.recordCashPayment(req.user.id, dto.rideId, dto.amount);
   }
 
@@ -44,11 +33,6 @@ export class WalletController {
   @Get('transactions')
   getTransactions(@Req() req: any) {
     return this.walletService.getTransactionHistory(req.user.id);
-  }
-
-  @Get('transactions/:userId')
-  getTransactionsById(@Param('userId') userId: string) {
-    return this.walletService.getTransactionHistory(userId);
   }
 
   @Post('create-recharge-intent')

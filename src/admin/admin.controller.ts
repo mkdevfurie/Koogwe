@@ -11,10 +11,12 @@ import {
   HttpCode,
   HttpStatus,
   ForbiddenException,
+  BadRequestException,
   Req,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
+import { WalletService } from '../wallet/wallet.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 // Guard qui vérifie que l'utilisateur est bien ADMIN
@@ -36,7 +38,10 @@ class AdminGuard implements CanActivate {
 @UseGuards(JwtAuthGuard, AdminGuard)
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly walletService: WalletService,
+  ) {}
 
   // ─── Dashboard ─────────────────────────────────────────────────────────────
 
@@ -178,6 +183,21 @@ export class AdminController {
       page ? Number(page) : 1,
       limit ? Number(limit) : 20,
     );
+  }
+
+  // ─── Wallet admin ─────────────────────────────────────────────────────────
+
+  @Post('wallet/:userId/recharge')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Recharge manuelle du wallet d\'un utilisateur (admin)' })
+  adminRechargeWallet(
+    @Param('userId') userId: string,
+    @Body() body: { amount: number },
+  ) {
+    if (!body?.amount || body.amount <= 0) {
+      throw new BadRequestException('Montant invalide');
+    }
+    return this.walletService.rechargeManual(userId, body.amount);
   }
 
   // ─── Simulateur de prix ────────────────────────────────────────────────────

@@ -11,8 +11,9 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
-import { SendOtpDto, VerifyOtpDto, AdminLoginDto } from './dto/auth.dto';
+import { SendOtpDto, VerifyOtpDto, VerifyOtpAndPasswordDto, AdminLoginDto } from './dto/auth.dto';
 import * as bcrypt from 'bcryptjs';
+import { randomInt } from 'crypto'; // ✅ FIX #9 : crypto.randomInt (sécurisé)
 
 @Injectable()
 export class AuthService {
@@ -27,7 +28,7 @@ export class AuthService {
 
   // ─── Génération OTP 6 chiffres ────────────────────────────────────────────
   private generateOtp(): string {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100000, 1000000).toString(); // ✅ FIX #9 : crypto.randomInt
   }
 
   // ─── Envoi de l'OTP ───────────────────────────────────────────────────────
@@ -75,40 +76,57 @@ export class AuthService {
 
   // ─── Vérification OTP ─────────────────────────────────────────────────────
   async verifyOtp(dto: VerifyOtpDto) {
-    const { email, code } = dto;
+    const { userBefore, updatedUser, isNewUser } = await this.consumeOtp(dto.email, dto.code);
+    return this.buildAuthResponse(updatedUser, userBefore, isNewUser);
+  }
+
+  // ─── Vérification OTP + définition du mot de passe (inscription apps) ─────
+  async verifyOtpAndSetPassword(dto: VerifyOtpAndPasswordDto) {
+    const { userBefore, updatedUser, isNewUser } = await this.consumeOtp(dto.email, dto.code);
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+
+    const userWithPassword = await this.prisma.user.update({
+      where: { id: updatedUser.id },
+      data: { hashedPassword },
+    });
+
+    return this.buildAuthResponse(userWithPassword, userBefore, isNewUser);
+  }
+
+  private async consumeOtp(email: string, code: string) {
     const normalizedEmail = email.toLowerCase().trim();
 
-    const user = await this.prisma.user.findUnique({
+    const userBefore = await this.prisma.user.findUnique({
       where: { email: normalizedEmail },
       include: { driverProfile: true },
     });
 
-    if (!user) {
+    if (!userBefore) {
       throw new BadRequestException('Aucun compte trouvé pour cet email');
     }
 
-    if (!user.otpExpiresAt || user.otpExpiresAt < new Date()) {
+    if (!userBefore.otpExpiresAt || userBefore.otpExpiresAt < new Date()) {
       throw new BadRequestException('Le code OTP a expiré. Veuillez en demander un nouveau.');
     }
 
     const maxAttempts = Number(this.config.get('OTP_MAX_ATTEMPTS', 5));
-    if (user.otpAttempts >= maxAttempts) {
+    if (userBefore.otpAttempts >= maxAttempts) {
       throw new HttpException(
         'Trop de tentatives incorrectes. Demandez un nouveau code.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
 
-    if (user.otpCode !== code) {
+    if (userBefore.otpCode !== code) {
       await this.prisma.user.update({
         where: { email: normalizedEmail },
         data: { otpAttempts: { increment: 1 } },
       });
-      const remaining = maxAttempts - user.otpAttempts - 1;
+      const remaining = maxAttempts - userBefore.otpAttempts - 1;
       throw new BadRequestException(`Code incorrect. ${remaining} tentative(s) restante(s).`);
     }
 
-    const isNewUser = !user.isVerified;
+    const isNewUser = !userBefore.isVerified;
 
     const updatedUser = await this.prisma.user.update({
       where: { email: normalizedEmail },
@@ -121,9 +139,7 @@ export class AuthService {
     });
 
     if (isNewUser) {
-      await this.mail.sendWelcome(normalizedEmail, user.firstName ?? 'là', user.language);
-
-      // 🔧 FIX : créer le wallet pour ce nouvel utilisateur (sinon /wallet/* plante)
+      await this.mail.sendWelcome(normalizedEmail, userBefore.firstName ?? 'là', userBefore.language);
       try {
         await this.prisma.wallet.upsert({
           where: { userId: updatedUser.id },
@@ -135,6 +151,14 @@ export class AuthService {
       }
     }
 
+    return { userBefore, updatedUser, isNewUser };
+  }
+
+  private async buildAuthResponse(
+    updatedUser: { id: string; email: string; firstName: string | null; lastName: string | null; avatarUrl: string | null; role: string; isVerified: boolean; language: string },
+    userBefore: { driverProfile: { adminApproved: boolean } | null },
+    isNewUser: boolean,
+  ) {
     const tokens = await this.generateTokens(updatedUser.id, updatedUser.email, updatedUser.role);
 
     await this.prisma.user.update({
@@ -153,8 +177,12 @@ export class AuthService {
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
         language: updatedUser.language,
-        hasDriver: !!user.driverProfile,
-        driverStatus: user.driverProfile?.adminApproved ? 'APPROVED' : (user.driverProfile ? 'PENDING' : null),
+        hasDriver: !!userBefore.driverProfile,
+        driverStatus: userBefore.driverProfile?.adminApproved
+          ? 'APPROVED'
+          : userBefore.driverProfile
+            ? 'PENDING'
+            : null,
       },
       isNewUser,
     };

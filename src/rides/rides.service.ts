@@ -5,6 +5,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AppGateway } from '../common/websocket.gateway';
 import { MailService } from '../mail/mail.service';
+import { randomInt } from 'crypto'; // ✅ FIX #9 : crypto.randomInt (sécurisé)
 
 function calculatePrice(params: {
   distanceKm: number; durationMin: number; vehicleType: string;
@@ -52,6 +53,25 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 
 const VALID_VEHICLE_TYPES = ['MOTO', 'ECO', 'CONFORT', 'VAN', 'BERLINE', 'SUV', 'LUXE'];
 
+const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
+  REQUESTED: ['ACCEPTED', 'CANCELLED'],
+  ACCEPTED: ['DRIVER_EN_ROUTE', 'CANCELLED'],
+  DRIVER_EN_ROUTE: ['ARRIVED', 'CANCELLED'],
+  ARRIVED: ['IN_PROGRESS', 'CANCELLED'],
+  IN_PROGRESS: ['COMPLETED', 'CANCELLED'],
+  COMPLETED: [],
+  CANCELLED: [],
+};
+
+function assertStatusTransition(current: string, next: string): void {
+  const allowed = ALLOWED_STATUS_TRANSITIONS[current];
+  if (!allowed || !allowed.includes(next)) {
+    throw new BadRequestException(
+      `Transition de statut invalide : ${current} → ${next}`,
+    );
+  }
+}
+
 @Injectable()
 export class RidesService {
   private readonly logger = new Logger(RidesService.name);
@@ -67,14 +87,16 @@ export class RidesService {
       throw new BadRequestException('Coordonnées GPS invalides');
     }
 
-    const distanceKm: number =
-      typeof data.distanceKm === 'number' && data.distanceKm > 0
-        ? data.distanceKm
-        : haversineKm(data.pickupLat, data.pickupLng, data.dropoffLat, data.dropoffLng);
+    const distanceKm = haversineKm(
+      data.pickupLat,
+      data.pickupLng,
+      data.dropoffLat,
+      data.dropoffLng,
+    );
 
-    const durationMin: number =
+    const durationMin =
       typeof data.durationMin === 'number' && data.durationMin > 0
-        ? data.durationMin
+        ? Math.round(data.durationMin)
         : Math.round((distanceKm / 30) * 60);
 
     let vehicleType = (data.vehicleType || 'ECO').toString().toUpperCase();
@@ -96,12 +118,14 @@ export class RidesService {
         distanceKm,
         durationMin,
         paymentMethod:   (data.paymentMethod || 'CASH') as any,
-        pinCode:         Math.floor(100000 + Math.random() * 900000).toString(),
+        pinCode:         randomInt(100000, 1000000).toString(), // ✅ FIX #9 : crypto.randomInt
         status:          'REQUESTED',
       },
     });
 
-    this.gateway.server.emit('ride:new', {
+    // ✅ FIX #6 : émettre uniquement aux chauffeurs disponibles du bon type de véhicule
+    // (pas à tous les clients connectés, y compris les passagers)
+    this.gateway.server.to(`drivers:${vehicleType}`).emit('ride:new', {
       id: ride.id,
       pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
@@ -167,6 +191,14 @@ export class RidesService {
   }
 
   async acceptRide(rideId: string, driverId: string) {
+    const driverProfile = await this.prisma.driverProfile.findUnique({
+      where: { userId: driverId },
+      select: { adminApproved: true },
+    });
+    if (!driverProfile?.adminApproved) {
+      throw new ForbiddenException('Compte chauffeur non validé par l\'administrateur');
+    }
+
     const updated = await this.prisma.$transaction(async (tx) => {
       const ride = await tx.ride.findUnique({ where: { id: rideId } });
       if (!ride) throw new NotFoundException('Course introuvable');
@@ -231,6 +263,8 @@ export class RidesService {
     if (ride.passengerId !== requesterId && ride.driverId !== requesterId) {
       throw new ForbiddenException('Non autorisé');
     }
+
+    assertStatusTransition(ride.status, status);
 
     const updated = await this.prisma.ride.update({
       where: { id: rideId },

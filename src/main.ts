@@ -57,27 +57,36 @@ app.enableCors({
 });
 
 
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    }),
+  );
+
   // ─── Préfixe global /api ──────────────────────────────────────────────────
   app.setGlobalPrefix('api');
 
-  // ─── Swagger Documentation ────────────────────────────────────────────────
-  const config = new DocumentBuilder()
-    .setTitle('Koogwe Transport API')
-    .setDescription('Backend API pour les applications passager et chauffeur Koogwe')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .addTag('Auth', 'Authentification OTP par email')
-    .addTag('Admin', 'Administration')
-    .addTag('Users', 'Gestion des profils utilisateurs')
-    .addTag('Rides', 'Cycle de vie des courses')
-    .build();
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Koogwe Transport API')
+      .setDescription('Backend API pour les applications passager et chauffeur Koogwe')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .addTag('Auth', 'Authentification OTP par email')
+      .addTag('Admin', 'Administration')
+      .addTag('Users', 'Gestion des profils utilisateurs')
+      .addTag('Rides', 'Cycle de vie des courses')
+      .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document, {
-    swaggerOptions: { persistAuthorization: true },
-  });
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, {
+      swaggerOptions: { persistAuthorization: true },
+    });
 
-  logger.log('📚 Swagger disponible sur /api/docs');
+    logger.log('Swagger disponible sur /api/docs');
+  }
 
   // ─── Démarrage ────────────────────────────────────────────────────────────
   const port = process.env.PORT || 3000;

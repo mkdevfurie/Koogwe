@@ -1,8 +1,15 @@
 // src/wallet/payments.controller.ts
-// 🔧 Compatibilité : les apps appellent /payments/* mais on redirige tout vers le wallet.
-//    CARD/PAYPAL sont automatiquement convertis en CASH ou WALLET selon le contexte.
-
-import { Controller, Get, Post, Body, Param, UseGuards, Req, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  UseGuards,
+  Req,
+  Logger,
+} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WalletService } from './wallet.service';
@@ -20,60 +27,75 @@ export class PaymentsController {
     private readonly prisma: PrismaService,
   ) {}
 
-  /**
-   * Autorise le paiement : ne fait rien côté Stripe (mode démo),
-   * mais retourne un statut compatible avec ce que l'app attend.
-   */
   @Post('authorize')
   @ApiOperation({ summary: 'Autoriser un paiement' })
-  async authorize(@Req() req: any, @Body() body: { rideId?: string; amount?: number }) {
-    this.logger.log(`[Payments] Authorize user=${req.user.id} ride=${body?.rideId} amount=${body?.amount}`);
-    return {
-      success: true,
-      message: 'Paiement autorisé',
-      status: 'AUTHORIZED',
-      transactionId: `auth_${Date.now()}_${req.user.id.substring(0, 8)}`,
-    };
+  async authorize(
+    @Req() req: any,
+    @Body() body: { rideId?: string; amount?: number; method?: string; paymentMethod?: string },
+  ) {
+    if (!body?.rideId) {
+      throw new BadRequestException('rideId requis');
+    }
+    this.logger.log(`[Payments] Authorize user=${req.user.id} ride=${body.rideId}`);
+    const method = body.method ?? body.paymentMethod;
+    return this.walletService.authorizeRidePayment(req.user.id, body.rideId, method);
   }
 
-  /**
-   * Finalise le paiement : enregistre la transaction selon le mode (cash ou wallet).
-   * Met à jour la course en isPaid=true.
-   */
   @Post('finalize')
   @ApiOperation({ summary: 'Finaliser un paiement' })
   async finalize(
     @Req() req: any,
-    @Body() body: { rideId: string; amount: number; paymentMethod?: string },
+    @Body()
+    body: {
+      rideId: string;
+      amount?: number;
+      finalAmount?: number;
+      paymentMethod?: string;
+      method?: string;
+    },
   ) {
     const userId = req.user.id;
-    const { rideId, amount } = body;
-    const paymentMethod = (body.paymentMethod || 'CASH').toUpperCase();
+    const { rideId } = body;
 
-    if (!rideId || !amount || amount <= 0) {
-      return { success: false, message: 'Paramètres invalides' };
+    if (!rideId) {
+      throw new BadRequestException('rideId requis');
     }
 
-    this.logger.log(`[Payments] Finalize user=${userId} ride=${rideId} method=${paymentMethod} amount=${amount}`);
+    const clientAmount = body.finalAmount ?? body.amount;
+    if (clientAmount != null) {
+      const { amount: serverAmount } = await this.walletService.resolveChargeAmount(rideId, userId);
+      if (Math.abs(clientAmount - serverAmount) > 0.01) {
+        throw new BadRequestException('Montant invalide');
+      }
+    }
 
-    // CARD/PAYPAL → on traite comme CASH pour la démo
+    const paymentMethod = (body.paymentMethod || body.method || 'CASH').toUpperCase();
+    this.logger.log(`[Payments] Finalize user=${userId} ride=${rideId} method=${paymentMethod}`);
+
     if (paymentMethod === 'WALLET') {
-      const result = await this.walletService.payRideFromWallet(userId, rideId, amount);
-      return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
-    } else {
-      // CASH par défaut (et tout autre méthode non supportée tombe ici)
-      const result = await this.walletService.recordCashPayment(userId, rideId, amount);
+      const result = await this.walletService.payRideFromWallet(userId, rideId);
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
     }
+    if (paymentMethod === 'CARD') {
+      const result = await this.walletService.payRideFromCard(userId, rideId);
+      return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
+    }
+    if (paymentMethod === 'PAYPAL') {
+      const result = await this.walletService.payRideFromPaypal(userId, rideId);
+      return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
+    }
+
+    const result = await this.walletService.recordCashPayment(userId, rideId);
+    return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
   }
 
   @Post('release-auth')
-  async release(@Req() req: any) {
+  async release() {
     return { success: true, message: 'Autorisation libérée' };
   }
 
   @Post('refund')
-  async refund(@Req() req: any, @Body() body: { rideId?: string }) {
+  async refund(@Body() body: { rideId?: string }) {
     return { success: true, message: 'Remboursement enregistré', rideId: body?.rideId };
   }
 
@@ -84,12 +106,23 @@ export class PaymentsController {
   }
 
   @Get(':rideId/status')
-  async getStatus(@Param('rideId') rideId: string) {
+  async getStatus(@Param('rideId') rideId: string, @Req() req: any) {
     const ride = await this.prisma.ride.findUnique({
       where: { id: rideId },
-      select: { id: true, isPaid: true, finalPrice: true, estimatedPrice: true, paymentMethod: true },
+      select: {
+        id: true,
+        isPaid: true,
+        finalPrice: true,
+        estimatedPrice: true,
+        paymentMethod: true,
+        passengerId: true,
+        driverId: true,
+      },
     });
     if (!ride) return { status: 'NOT_FOUND', rideId };
+    if (ride.passengerId !== req.user.id && ride.driverId !== req.user.id && req.user.role !== 'ADMIN') {
+      throw new BadRequestException('Course introuvable');
+    }
     return {
       status: ride.isPaid ? 'COMPLETED' : 'PENDING',
       rideId: ride.id,
@@ -99,7 +132,7 @@ export class PaymentsController {
   }
 
   @Post('transfer-driver')
-  async transferDriver(@Body() body: any) {
+  async transferDriver() {
     return { success: true, message: 'Transfert effectué' };
   }
 }

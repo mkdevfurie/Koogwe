@@ -16,26 +16,39 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       const adminCount = await this.user.count({ where: { role: 'ADMIN' } });
 
       if (adminCount === 0) {
-        const plainPassword = process.env.ADMIN_PASSWORD || 'AdminKoogwe2026!';
-        const hashedPassword = await bcrypt.hash(plainPassword, 10);
+        const isProduction = process.env.NODE_ENV === 'production';
+        const plainPassword = process.env.ADMIN_PASSWORD;
 
-        const admin = await this.user.create({
-          data: {
-            email: adminEmail,
-            hashedPassword,
-            firstName: 'Super',
-            lastName: 'Admin',
-            role: 'ADMIN',
-            isActive: true,
-            isVerified: true,
-            accountStatus: 'ACTIVE',
-          },
-        });
+        if (isProduction && !plainPassword) {
+          this.logger.error(
+            'Aucun administrateur et ADMIN_PASSWORD non défini — création admin ignorée en production',
+          );
+        } else {
+          const passwordToHash = plainPassword || 'AdminKoogwe2026!';
+          const hashedPassword = await bcrypt.hash(passwordToHash, 10);
 
-        await this.wallet.create({ data: { userId: admin.id, balance: 0 } });
+          const admin = await this.user.create({
+            data: {
+              email: adminEmail,
+              hashedPassword,
+              firstName: 'Super',
+              lastName: 'Admin',
+              role: 'ADMIN',
+              isActive: true,
+              isVerified: true,
+              accountStatus: 'ACTIVE',
+            },
+          });
 
-        this.logger.log(`✅ Premier administrateur créé : ${adminEmail}`);
-        this.logger.log(`🔑 Mot de passe : ${plainPassword}`);
+          await this.wallet.create({ data: { userId: admin.id, balance: 0 } });
+
+          this.logger.log(`Premier administrateur créé : ${adminEmail}`);
+          if (!isProduction) {
+            this.logger.warn(
+              'Définissez ADMIN_PASSWORD dans les variables d\'environnement et changez le mot de passe par défaut',
+            );
+          }
+        }
       } else {
         this.logger.log('👤 Un administrateur existe déjà.');
       }

@@ -66,6 +66,18 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.connectedUsers.set(userId, client.id);
       client.join(`user:${userId}`);
 
+      // ✅ FIX #6 : Si le chauffeur est déjà en ligne, le faire rejoindre sa room automatiquement
+      this.prisma.driverProfile.findUnique({
+        where: { userId },
+        select: { isOnline: true, vehicleType: true }
+      }).then(profile => {
+        if (profile?.isOnline && profile?.vehicleType) {
+          const room = `drivers:${profile.vehicleType}`;
+          client.join(room);
+          this.logger.log(`Driver ${userId} auto-joined room ${room}`);
+        }
+      }).catch(() => {});
+
       this.logger.log(`✅ WebSocket connecté → userId=${userId} | socket=${client.id}`);
     } catch (e) {
       this.logger.warn(`Connexion refusée - token invalide (${client.id})`);
@@ -117,9 +129,26 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = (client as any).userId;
     if (!userId) return;
 
-    await this.prisma.driverProfile
-      .update({ where: { userId }, data: { isOnline: data.availability === 'ONLINE' } })
-      .catch(() => {});
+    try {
+      const profile = await this.prisma.driverProfile.update({
+        where: { userId },
+        data: { isOnline: data.availability === 'ONLINE' },
+        select: { vehicleType: true },
+      });
+
+      if (profile?.vehicleType) {
+        const room = `drivers:${profile.vehicleType}`;
+        if (data.availability === 'ONLINE') {
+          client.join(room);
+          this.logger.log(`Driver ${userId} went ONLINE: joined room ${room}`);
+        } else {
+          client.leave(room);
+          this.logger.log(`Driver ${userId} went OFFLINE: left room ${room}`);
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`Failed to update availability for driver ${userId}: ${e}`);
+    }
   }
 
   @SubscribeMessage('ride:join')
@@ -127,87 +156,6 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = (client as any).userId;
     if (!userId || !data.rideId) return;
     client.join(`ride:${data.rideId}`);
-  }
-
-  @SubscribeMessage('ride:accept')
-  async handleRideAccept(@ConnectedSocket() client: Socket, @MessageBody() data: { rideId: string }) {
-    const driverId = (client as any).userId;
-    if (!driverId || !data.rideId) return;
-
-    try {
-      const ride = await this.prisma.ride.findUnique({ where: { id: data.rideId } });
-      if (!ride || ride.status !== 'REQUESTED') return;
-
-      await this.prisma.ride.update({
-        where: { id: data.rideId },
-        data: { driverId, status: 'ACCEPTED', acceptedAt: new Date() },
-      });
-
-      const driver = await this.prisma.user.findUnique({
-        where: { id: driverId },
-        select: {
-          firstName: true,
-          lastName: true,
-          phone: true,
-          avatarUrl: true,
-          driverProfile: true,
-        },
-      });
-
-      this.server.to(`ride:${data.rideId}`).emit('ride:accepted', {
-        rideId: data.rideId,
-        driverId,
-        status: 'ACCEPTED',
-        driver: {
-          name: `${driver?.firstName ?? ''} ${driver?.lastName ?? ''}`.trim(),
-          phone: driver?.phone,
-          avatarUrl: driver?.avatarUrl,
-          plate: driver?.driverProfile?.licensePlate,
-          vehicle: `${driver?.driverProfile?.vehicleMake ?? ''} ${driver?.driverProfile?.vehicleModel ?? ''}`.trim(),
-          rating: driver?.driverProfile?.rating,
-        },
-      });
-
-      // Notifier aussi le passager via ride:status
-      this.server.to(`ride:${data.rideId}`).emit('ride:status', {
-        rideId: data.rideId,
-        status: 'ACCEPTED',
-      });
-    } catch (e) {
-      this.logger.error(`ride:accept error: ${e}`);
-    }
-  }
-
-  // === Mise à jour de statut depuis le client (annulation, etc.) ===
-  @SubscribeMessage('ride:status')
-  async handleRideStatus(
-    @ConnectedSocket() client: Socket,
-    @MessageBody() data: { rideId: string; status: string },
-  ) {
-    const userId = (client as any).userId;
-    if (!userId || !data.rideId || !data.status) return;
-
-    try {
-      const ride = await this.prisma.ride.findUnique({ where: { id: data.rideId } });
-      if (!ride) return;
-      if (ride.passengerId !== userId && ride.driverId !== userId) return;
-
-      await this.prisma.ride.update({
-        where: { id: data.rideId },
-        data: {
-          status: data.status as any,
-          ...(data.status === 'COMPLETED' ? { completedAt: new Date() } : {}),
-          ...(data.status === 'CANCELLED' ? { cancelledAt: new Date() } : {}),
-        },
-      });
-
-      this.server.to(`ride:${data.rideId}`).emit('ride:status', {
-        rideId: data.rideId,
-        status: data.status,
-      });
-    } catch (e) {
-      this.logger.error(`ride:status error: ${e}`);
-    }
   }
 
   // === Chat en temps réel entre passager et chauffeur ===
