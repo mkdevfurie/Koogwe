@@ -84,13 +84,17 @@ export class MailService {
   }
 
   private async sendEmail(to: string, subject: string, html: string) {
+    const from =
+      process.env.RESEND_FROM || 'Koogwe <noreply@inovtechno.org>';
+    const timeoutMs = Number(process.env.RESEND_TIMEOUT_MS ?? 10_000);
+
     try {
-      await this.resend.emails.send({
-        from: 'Koogwe <noreply@inovtechno.org>',  // ✅ domaine vérifié sur Resend
-        to,
-        subject,
-        html,
-      });
+      await Promise.race([
+        this.resend.emails.send({ from, to, subject, html }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Resend timeout après ${timeoutMs}ms`)), timeoutMs),
+        ),
+      ]);
     } catch (error) {
       this.logger.error(`Erreur envoi email à ${to} [Sujet: ${subject}]: ${error.message}`);
       // On ne rebalance pas l'erreur pour éviter de casser le flux principal (ex: création de course)

@@ -14,10 +14,12 @@ import { AdminModule } from './admin/admin.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { WalletModule } from './wallet/wallet.module';
 import { DocumentsModule } from './documents/documents.module';
+import { HealthController } from './health/health.controller';
 
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 
 @Module({
+  controllers: [HealthController],
   imports: [
     // 1. Configuration globale (doit être en premier)
     ConfigModule.forRoot({

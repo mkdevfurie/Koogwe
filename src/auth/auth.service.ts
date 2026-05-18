@@ -68,8 +68,11 @@ export class AuthService {
       },
     });
 
-    await this.mail.sendOtp(normalizedEmail, otpCode, language);
-    this.logger.log(`OTP envoyé à ${normalizedEmail}`);
+    // Répondre tout de suite — l'email part en arrière-plan (évite timeout app mobile)
+    this.mail.sendOtp(normalizedEmail, otpCode, language).catch((err) => {
+      this.logger.error(`Échec envoi OTP à ${normalizedEmail}: ${err?.message || err}`);
+    });
+    this.logger.log(`OTP enregistré pour ${normalizedEmail} (envoi email en cours)`);
 
     return { message: 'Code OTP envoyé par email', expiresIn: 600 };
   }
