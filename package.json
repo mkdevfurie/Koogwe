@@ -16,6 +16,7 @@
     "start:prod": "node dist/main.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:resolve-failed": "prisma migrate resolve --rolled-back \"20260411112900_remove_licenseplate_unique\"",
     "deploy": "prisma migrate deploy && npm run start:prod",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix"
   },
