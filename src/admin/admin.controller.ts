@@ -112,15 +112,19 @@ export class AdminController {
   @Patch('documents/:id/approve')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approuver un document' })
-  approveDocument(@Param('id') id: string) {
-    return this.adminService.approveDocument(id);
+  approveDocument(@Param('id') id: string, @Req() req: { user: { id: string } }) {
+    return this.adminService.approveDocument(id, req.user.id);
   }
 
   @Patch('documents/:id/reject')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rejeter un document' })
-  rejectDocument(@Param('id') id: string, @Body() body: { reason?: string }) {
-    return this.adminService.rejectDocument(id, body.reason);
+  rejectDocument(
+    @Param('id') id: string,
+    @Req() req: { user: { id: string } },
+    @Body() body: { reason?: string },
+  ) {
+    return this.adminService.rejectDocument(id, req.user.id, body.reason);
   }
 
   // ─── Passagers ─────────────────────────────────────────────────────────────

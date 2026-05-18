@@ -2,6 +2,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { AppGateway } from '../common/websocket.gateway';
 import { DocumentStatus, DocumentType } from '@prisma/client';
 
 // Documents requis pour qu'un chauffeur soit auto-activé après approbation
@@ -19,7 +20,42 @@ export class AdminService {
   constructor(
     private prisma: PrismaService,
     private mail: MailService,
+    private gateway: AppGateway,
   ) {}
+
+  private formatUserDisplayName(user?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    email?: string | null;
+  } | null) {
+    return (
+      [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+      user?.email ||
+      'Inconnu'
+    );
+  }
+
+  private mapDocumentForAdmin<T extends { fileUrl: string; user?: any }>(doc: T) {
+    const u = doc.user;
+    const driverName = this.formatUserDisplayName(u);
+    return {
+      ...doc,
+      url: doc.fileUrl,
+      driverName,
+      uploaderName: driverName,
+      uploaderEmail: u?.email ?? null,
+      uploaderId: u?.id ?? null,
+    };
+  }
+
+  private emitDocumentUpdated(documentId: string, status: string, userId?: string) {
+    this.gateway.server?.to('admin').emit('document:updated', {
+      topic: 'document',
+      documentId,
+      status,
+      userId,
+    });
+  }
 
   /**
    * 🔧 HELPER : trouve un driverProfile par son id OU par l'id du user lié.
@@ -94,13 +130,14 @@ export class AdminService {
 
   // ─── Documents en attente ──────────────────────────────────────────────────
   async getPendingDocuments() {
-    return this.prisma.document.findMany({
+    const docs = await this.prisma.document.findMany({
       where: { status: 'PENDING' },
       orderBy: { uploadedAt: 'desc' },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true } },
       },
     });
+    return docs.map((d) => this.mapDocumentForAdmin(d));
   }
 
   // ─── Chauffeurs ────────────────────────────────────────────────────────────
@@ -203,13 +240,14 @@ export class AdminService {
       where.status = status;
     }
 
-    return this.prisma.document.findMany({
+    const docs = await this.prisma.document.findMany({
       where,
       orderBy: { uploadedAt: 'desc' },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true } },
       },
     });
+    return docs.map((d) => this.mapDocumentForAdmin(d));
   }
 
   /**
@@ -217,28 +255,35 @@ export class AdminService {
    * du chauffeur sont approuvés. Si oui → activation automatique du compte.
    * (avant, l'admin devait approuver les docs ET activer le chauffeur manuellement)
    */
-  async approveDocument(id: string) {
+  async approveDocument(id: string, adminId: string) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Document introuvable');
 
     await this.prisma.document.update({
       where: { id },
-      data: { status: 'APPROVED', reviewedAt: new Date() },
+      data: { status: 'APPROVED', reviewedAt: new Date(), reviewedBy: adminId },
     });
 
     await this.maybeAutoActivateDriver(doc.userId);
+    this.emitDocumentUpdated(id, 'APPROVED', doc.userId);
 
     return { message: 'Document approuvé' };
   }
 
-  async rejectDocument(id: string, reason?: string) {
+  async rejectDocument(id: string, adminId: string, reason?: string) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Document introuvable');
 
     await this.prisma.document.update({
       where: { id },
-      data: { status: 'REJECTED', rejectionReason: reason ?? null, reviewedAt: new Date() },
+      data: {
+        status: 'REJECTED',
+        rejectionReason: reason ?? null,
+        reviewedAt: new Date(),
+        reviewedBy: adminId,
+      },
     });
+    this.emitDocumentUpdated(id, 'REJECTED', doc.userId);
     return { message: 'Document rejeté', reason };
   }
 

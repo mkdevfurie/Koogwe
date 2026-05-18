@@ -5,9 +5,10 @@ import { AdminService } from './admin.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { WalletModule } from '../wallet/wallet.module';
+import { CommonModule } from '../common/common.module';
 
 @Module({
-  imports: [PrismaModule, MailModule, WalletModule],
+  imports: [PrismaModule, MailModule, WalletModule, CommonModule],
   controllers: [AdminController],
   providers: [AdminService],
   exports: [AdminService],

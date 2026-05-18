@@ -66,6 +66,16 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.connectedUsers.set(userId, client.id);
       client.join(`user:${userId}`);
 
+      this.prisma.user
+        .findUnique({ where: { id: userId }, select: { role: true } })
+        .then((user) => {
+          if (user?.role === 'ADMIN') {
+            client.join('admin');
+            this.logger.log(`Admin ${userId} joined room admin`);
+          }
+        })
+        .catch(() => {});
+
       // ✅ FIX #6 : Si le chauffeur est déjà en ligne, le faire rejoindre sa room automatiquement
       this.prisma.driverProfile.findUnique({
         where: { userId },

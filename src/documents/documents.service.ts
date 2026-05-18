@@ -5,6 +5,7 @@ import {
 import { DocumentStatus, DocumentType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { AppGateway } from '../common/websocket.gateway';
 import { parseDocType } from '../common/utils';
 
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
@@ -21,7 +22,20 @@ export class DocumentsService {
   constructor(
     private prisma: PrismaService,
     private cloudinaryService: CloudinaryService,
+    private gateway: AppGateway,
   ) {}
+
+  private formatUserDisplayName(user?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    email?: string | null;
+  } | null) {
+    return (
+      [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+      user?.email ||
+      'Inconnu'
+    );
+  }
 
   private toDocStatus(status?: string, approved?: boolean): DocumentStatus {
     if (typeof approved === 'boolean')
@@ -123,6 +137,20 @@ export class DocumentsService {
       this.logger.warn(`DriverProfile update échoué user=${userId}: ${err?.message || err}`);
     });
 
+    const uploader = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, email: true },
+    });
+    const driverName = this.formatUserDisplayName(uploader);
+    this.gateway.server?.to('admin').emit('document:new', {
+      topic: 'document',
+      documentId: document.id,
+      userId,
+      driverName,
+      status: document.status,
+      type: docType,
+    });
+
     return {
       success: true,
       message: 'Document envoyé avec succès',
@@ -135,10 +163,12 @@ export class DocumentsService {
   }
 
   private mapDoc<T extends { fileUrl: string; publicId?: string; user?: any }>(doc: T) {
+    const driverName = this.formatUserDisplayName(doc.user);
     return {
       ...doc,
       url: doc.fileUrl,
-      uploaderName: doc.user?.firstName || doc.user?.email || 'Inconnu',
+      driverName,
+      uploaderName: driverName,
       uploaderEmail: doc.user?.email ?? null,
       uploaderId: doc.user?.id ?? null,
     };
@@ -147,7 +177,7 @@ export class DocumentsService {
   async listPendingDocuments() {
     const docs = await this.prisma.document.findMany({
       where: { status: DocumentStatus.PENDING },
-      include: { user: { select: { id: true, email: true, firstName: true, role: true, accountStatus: true } } },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true, role: true, accountStatus: true } } },
       orderBy: { uploadedAt: 'asc' },
     });
     return docs.map((d) => this.mapDoc(d));
@@ -156,7 +186,7 @@ export class DocumentsService {
   async listApprovedDocuments() {
     const docs = await this.prisma.document.findMany({
       where: { status: DocumentStatus.APPROVED },
-      include: { user: { select: { id: true, email: true, firstName: true, role: true } } },
+      include: { user: { select: { id: true, email: true, firstName: true, lastName: true, role: true } } },
       orderBy: { reviewedAt: 'desc' },
       take: 300,
     });
@@ -169,7 +199,7 @@ export class DocumentsService {
     if (n === 'REJECTED') {
       const docs = await this.prisma.document.findMany({
         where: { status: DocumentStatus.REJECTED },
-        include: { user: { select: { id: true, email: true, firstName: true, role: true } } },
+        include: { user: { select: { id: true, email: true, firstName: true, lastName: true, role: true } } },
         orderBy: { reviewedAt: 'desc' },
         take: 300,
       });
