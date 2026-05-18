@@ -1,0 +1,12 @@
+# Configuration Railway — Koogwe Backend
+# https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "nixpacks"
+# Inclure les devDependencies (@nestjs/cli, typescript) pour compiler NestJS
+buildCommand = "npm ci --include=dev && npx prisma generate && npm run build"
+
+[deploy]
+startCommand = "npx prisma migrate deploy && node dist/main.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
