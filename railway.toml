@@ -7,6 +7,6 @@ builder = "nixpacks"
 buildCommand = "npm ci --include=dev && npx prisma generate && npm run build"
 
 [deploy]
-startCommand = "npx prisma migrate deploy && node dist/main.js"
+startCommand = "ls -la dist/ 2>&1 ; node --version ; npx prisma migrate deploy && node dist/main.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
