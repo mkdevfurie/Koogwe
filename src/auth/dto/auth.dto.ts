@@ -47,7 +47,7 @@ export class LoginPasswordDto {
 
   @ApiProperty()
   @IsString()
-  @MinLength(6)
+  @MinLength(8, { message: 'Le mot de passe doit contenir au moins 8 caractères' })
   password: string;
 }
 
