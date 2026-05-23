@@ -35,23 +35,35 @@ export class DriversService {
 
   async createProfile(userId: string, dto: CreateDriverProfileDto) {
     const existing = await this.prisma.driverProfile.findUnique({ where: { userId } });
-    if (existing) throw new BadRequestException('Profil chauffeur déjà existant');
 
     if (dto.vehiclePlate) {
-      const plateExists = await this.prisma.driverProfile.findFirst({ where: { licensePlate: dto.vehiclePlate } });
+      const plateExists = await this.prisma.driverProfile.findFirst({
+        where: {
+          licensePlate: dto.vehiclePlate,
+          ...(existing ? { userId: { not: userId } } : {}),
+        },
+      });
       if (plateExists) throw new BadRequestException('Cette plaque est déjà utilisée');
     }
 
+    const vehicleData = {
+      vehicleType: dto.vehicleType,
+      vehicleMake: dto.vehicleMake,
+      vehicleModel: dto.vehicleModel,
+      vehicleYear: dto.vehicleYear,
+      licensePlate: dto.vehiclePlate,
+      vehicleColor: dto.vehicleColor,
+    };
+
+    if (existing) {
+      return this.prisma.driverProfile.update({
+        where: { userId },
+        data: vehicleData,
+      });
+    }
+
     const profile = await this.prisma.driverProfile.create({
-      data: {
-        userId,
-        vehicleType: dto.vehicleType,
-        vehicleMake: dto.vehicleMake,
-        vehicleModel: dto.vehicleModel,
-        vehicleYear: dto.vehicleYear,
-        licensePlate: dto.vehiclePlate,
-        vehicleColor: dto.vehicleColor,
-      },
+      data: { userId, ...vehicleData },
     });
 
     await this.prisma.user.update({
