@@ -32,9 +32,21 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         },
       },
     });
-    if (!user || !user.isActive) {
-      throw new UnauthorizedException('Compte inactif ou introuvable');
+    if (!user) {
+      throw new UnauthorizedException('Compte introuvable');
     }
+
+    const accountOk =
+      user.isActive ||
+      user.accountStatus === 'ACTIVE' ||
+      (user.driverProfile != null && user.driverProfile.adminApproved);
+
+    if (!accountOk) {
+      throw new UnauthorizedException(
+        'Compte inactif. Utilisez la connexion OTP ou contactez le support.',
+      );
+    }
+
     return user;
   }
 }

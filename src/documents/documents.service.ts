@@ -250,7 +250,7 @@ export class DocumentsService {
       include: { driverProfile: true, documents: true },
     });
 
-    if (!user || user.role !== 'DRIVER' || !user.driverProfile)
+    if (!user || !user.driverProfile)
       throw new NotFoundException('Chauffeur introuvable');
 
     if (approved && (!user.driverProfile.vehicleMake || !user.driverProfile.licensePlate)) {
@@ -259,7 +259,7 @@ export class DocumentsService {
         data: {
           vehicleMake: user.driverProfile.vehicleMake || 'Véhicule',
           vehicleModel: user.driverProfile.vehicleModel || 'Standard',
-          licensePlate: user.driverProfile.licensePlate || `TG-${Date.now().toString().slice(-6)}`,
+          licensePlate: user.driverProfile.licensePlate || `GF-${Date.now().toString().slice(-6)}`,
         },
       });
     }
@@ -293,7 +293,7 @@ export class DocumentsService {
       where: { id: userId },
       include: { driverProfile: true, documents: true },
     });
-    if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
+    if (!user || !user.driverProfile) return;
 
     const allApproved = this.hasAllRequired(user.documents);
     const hasVehicle = !!(

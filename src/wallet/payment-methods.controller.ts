@@ -11,8 +11,26 @@ import { WalletService } from './wallet.service';
 export class PaymentMethodsController {
   constructor(private walletService: WalletService) {}
 
+  @Get('stripe-config')
+  @ApiOperation({ summary: 'Configuration Stripe côté client (clé publique)' })
+  getStripeConfig() {
+    return this.walletService.getStripeConfig();
+  }
+
+  @Post('setup-intent')
+  @ApiOperation({ summary: 'Créer un SetupIntent pour enregistrer une carte (Payment Sheet)' })
+  createSetupIntent(@Req() req: any) {
+    return this.walletService.createSetupIntent(req.user.id);
+  }
+
+  @Post('card/confirm')
+  @ApiOperation({ summary: 'Confirmer une carte après SetupIntent Stripe' })
+  confirmCard(@Req() req: any, @Body() dto: { setupIntentId: string }) {
+    return this.walletService.confirmCardFromSetupIntent(req.user.id, dto.setupIntentId);
+  }
+
   @Post('card')
-  @ApiOperation({ summary: 'Enregistrer une carte bancaire' })
+  @ApiOperation({ summary: 'Enregistrer une carte bancaire (PaymentMethod ID Stripe)' })
   async saveCard(@Req() req: any, @Body() dto: { stripeMethodId: string }) {
     return this.walletService.saveCard(req.user.id, dto.stripeMethodId);
   }

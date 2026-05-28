@@ -5,7 +5,8 @@ import { MailService } from '../mail/mail.service';
 import { parseDocType } from '../common/utils';
 import { IsString, IsOptional, IsEnum, IsInt, IsNumber } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { VehicleType } from '@prisma/client';
+import { VehicleType, RideStatus } from '@prisma/client';
+import { AppGateway } from '../common/websocket.gateway';
 
 export class CreateDriverProfileDto {
   @ApiProperty({ enum: VehicleType }) @IsEnum(VehicleType) vehicleType: VehicleType;
@@ -31,7 +32,11 @@ export class UpdateLocationDto {
 export class DriversService {
   private readonly logger = new Logger(DriversService.name);
 
-  constructor(private prisma: PrismaService, private mail: MailService) {}
+  constructor(
+    private prisma: PrismaService,
+    private mail: MailService,
+    private gateway: AppGateway,
+  ) {}
 
   async createProfile(userId: string, dto: CreateDriverProfileDto) {
     const existing = await this.prisma.driverProfile.findUnique({ where: { userId } });
@@ -56,6 +61,10 @@ export class DriversService {
     };
 
     if (existing) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { role: 'DRIVER' },
+      });
       return this.prisma.driverProfile.update({
         where: { userId },
         data: vehicleData,
@@ -68,7 +77,10 @@ export class DriversService {
 
     await this.prisma.user.update({
       where: { id: userId },
-      data: { accountStatus: 'FACE_VERIFICATION_PENDING' as any },
+      data: {
+        role: 'DRIVER',
+        accountStatus: 'FACE_VERIFICATION_PENDING' as any,
+      },
     });
 
     return profile;
@@ -96,11 +108,39 @@ export class DriversService {
   }
 
   async updateLocation(userId: string, dto: UpdateLocationDto) {
-    return this.prisma.driverProfile.update({
+    const profile = await this.prisma.driverProfile.update({
       where: { userId },
       data: { currentLat: dto.latitude, currentLng: dto.longitude, heading: dto.heading, lastLocationAt: new Date() },
       select: { id: true, currentLat: true, currentLng: true },
     });
+
+    const activeRide = await this.prisma.ride.findFirst({
+      where: {
+        driverId: userId,
+        status: {
+          in: [
+            RideStatus.ACCEPTED,
+            RideStatus.DRIVER_EN_ROUTE,
+            RideStatus.ARRIVED,
+            RideStatus.IN_PROGRESS,
+          ],
+        },
+      },
+      select: { id: true },
+      orderBy: { requestedAt: 'desc' },
+    });
+
+    if (activeRide) {
+      this.gateway.emitDriverLocationToRide(
+        activeRide.id,
+        userId,
+        dto.latitude,
+        dto.longitude,
+        dto.heading,
+      );
+    }
+
+    return profile;
   }
 
   async uploadDocument(userId: string, type: string, fileUrl: string) {
@@ -223,6 +263,37 @@ export class DriversService {
     await this.prisma.user.update({ where: { id: driver.userId }, data: { accountStatus: 'REJECTED' } });
     this.mail.sendDriverRejected(driver.user.email, driver.user.firstName ?? 'Chauffeur', reason).catch(() => {});
     return { success: true, message: 'Chauffeur rejeté' };
+  }
+
+  async updateBankAccount(
+    userId: string,
+    dto: { bankAccountHolder?: string; bankIban?: string; bankBic?: string },
+  ) {
+    const profile = await this.prisma.driverProfile.findUnique({ where: { userId } });
+    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+
+    return this.prisma.driverProfile.update({
+      where: { userId },
+      data: {
+        bankAccountHolder: dto.bankAccountHolder?.trim() || profile.bankAccountHolder,
+        bankIban: dto.bankIban?.replace(/\s/g, '').toUpperCase() || profile.bankIban,
+        bankBic: dto.bankBic?.trim().toUpperCase() || profile.bankBic,
+      },
+      select: {
+        bankAccountHolder: true,
+        bankIban: true,
+        bankBic: true,
+      },
+    });
+  }
+
+  async getBankAccount(userId: string) {
+    const profile = await this.prisma.driverProfile.findUnique({
+      where: { userId },
+      select: { bankAccountHolder: true, bankIban: true, bankBic: true },
+    });
+    if (!profile) throw new NotFoundException('Profil chauffeur introuvable');
+    return profile;
   }
 
   async getPendingDrivers() {

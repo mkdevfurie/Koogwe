@@ -81,6 +81,13 @@ export class PaymentsController {
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
     }
     if (paymentMethod === 'PAYPAL') {
+      if ((process.env.PAYPAL_ENABLED ?? 'false').toLowerCase() !== 'true') {
+        return {
+          success: false,
+          status: 'FAILED',
+          message: 'PayPal indisponible en production sur cette version',
+        };
+      }
       const result = await this.walletService.payRideFromPaypal(userId, rideId);
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
     }

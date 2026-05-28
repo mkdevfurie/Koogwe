@@ -14,6 +14,7 @@ import { AdminModule } from './admin/admin.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { WalletModule } from './wallet/wallet.module';
 import { DocumentsModule } from './documents/documents.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { HealthController } from './health/health.controller';
 
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
@@ -56,6 +57,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
     AdminModule,
     WalletModule,
     DocumentsModule,
+    NotificationsModule,
   ],
   providers: [
     // Global Guards

@@ -146,6 +146,10 @@ model User {
   isActive           Boolean  @default(true)
   language           String   @default("fr")
   fcmToken           String?
+  stripeCustomerId   String?  @unique
+  paypalEmail        String?
+  notifPushEnabled   Boolean  @default(true)
+  notifEmailEnabled  Boolean  @default(true)
   accountStatus      AccountStatus @default(EMAIL_NOT_VERIFIED)
 
   otpCode            String?
@@ -231,6 +235,10 @@ model DriverProfile {
   totalEarnings           Float       @default(0)
   rating                  Float       @default(0)
   ratingCount             Int         @default(0)
+
+  bankAccountHolder       String?
+  bankIban                String?
+  bankBic                 String?
 
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
@@ -321,6 +329,7 @@ model Ride {
 
   paymentMethod     PaymentMethod @default(CASH)
   isPaid            Boolean       @default(false)
+  tipAmount         Float?
   payment           Payment?
 
   scheduledAt       DateTime?

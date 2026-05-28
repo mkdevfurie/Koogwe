@@ -1,5 +1,5 @@
 // src/users/users.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { IsString, IsOptional, IsIn } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
@@ -159,6 +159,48 @@ export class UsersService {
       where: { userId, isRead: false },
       data: { isRead: true, readAt: new Date() },
     });
+  }
+
+  async updatePreferences(
+    userId: string,
+    dto: { notifPushEnabled?: boolean; notifEmailEnabled?: boolean },
+  ) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.notifPushEnabled !== undefined ? { notifPushEnabled: dto.notifPushEnabled } : {}),
+        ...(dto.notifEmailEnabled !== undefined ? { notifEmailEnabled: dto.notifEmailEnabled } : {}),
+      },
+      select: {
+        id: true,
+        notifPushEnabled: true,
+        notifEmailEnabled: true,
+      },
+    });
+  }
+
+  async updatePaypalEmail(userId: string, paypalEmail: string) {
+    const email = paypalEmail.trim().toLowerCase();
+    if (!email.includes('@')) {
+      throw new BadRequestException('Email PayPal invalide');
+    }
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { paypalEmail: email },
+      select: { id: true, paypalEmail: true },
+    });
+  }
+
+  async deactivateAccount(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        isActive: false,
+        refreshToken: null,
+        fcmToken: null,
+      },
+    });
+    return { success: true, message: 'Compte désactivé' };
   }
 
   // ── Saved places ────────────────────────────────────────────────────────

@@ -168,6 +168,23 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.join(`ride:${data.rideId}`);
   }
 
+  /** Diffusion position chauffeur (HTTP PATCH location ou WebSocket). */
+  emitDriverLocationToRide(
+    rideId: string,
+    driverId: string,
+    lat: number,
+    lng: number,
+    heading?: number | null,
+  ) {
+    if (!this.server || !rideId) return;
+    this.server.to(`ride:${rideId}`).emit('driver:location', {
+      driverId,
+      lat,
+      lng,
+      heading: heading ?? null,
+    });
+  }
+
   // === Chat en temps réel entre passager et chauffeur ===
   @SubscribeMessage('chat:message')
   async handleChatMessage(

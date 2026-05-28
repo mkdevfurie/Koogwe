@@ -65,6 +65,12 @@ export class RidesController {
     return this.ridesService.getUserRides(req.user.id);
   }
 
+  @Get('active')
+  @ApiOperation({ summary: 'Course en cours pour l\'utilisateur connecté' })
+  getActiveRide(@Request() req: any) {
+    return this.ridesService.getActiveRideForUser(req.user.id);
+  }
+
   @Get(':id')
   async getRideById(@Request() req: any, @Param('id') rideId: string) {
     const ride = await this.prisma.ride.findUnique({
@@ -113,6 +119,16 @@ export class RidesController {
   @Post(':id/verify-pin')
   verifyPin(@Request() req: any, @Param('id') rideId: string, @Body() body: { pin: string }) {
     return this.ridesService.verifyPin(rideId, req.user.id, body.pin);
+  }
+
+  @Post(':id/tip')
+  @ApiOperation({ summary: 'Envoyer un pourboire au chauffeur (wallet)' })
+  addTip(
+    @Request() req: any,
+    @Param('id') rideId: string,
+    @Body() body: { amount: number },
+  ) {
+    return this.ridesService.addTip(rideId, req.user.id, body.amount);
   }
 
   @Post(':id/review')

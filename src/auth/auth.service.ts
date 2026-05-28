@@ -90,7 +90,10 @@ export class AuthService {
 
     const userWithPassword = await this.prisma.user.update({
       where: { id: updatedUser.id },
-      data: { hashedPassword },
+      data: {
+        hashedPassword,
+        ...(dto.registerAs === 'driver' ? { role: 'DRIVER' as const } : {}),
+      },
     });
 
     return this.buildAuthResponse(userWithPassword, userBefore, isNewUser);

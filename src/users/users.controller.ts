@@ -107,6 +107,27 @@ export class UsersController {
     return this.usersService.getRideHistory(req.user.id, +page, +limit);
   }
 
+  @Patch('me/preferences')
+  @ApiOperation({ summary: 'Préférences notifications' })
+  updatePreferences(
+    @Req() req: any,
+    @Body() body: { notifPushEnabled?: boolean; notifEmailEnabled?: boolean },
+  ) {
+    return this.usersService.updatePreferences(req.user.id, body);
+  }
+
+  @Patch('me/paypal')
+  @ApiOperation({ summary: 'Enregistrer email PayPal' })
+  updatePaypal(@Req() req: any, @Body() body: { paypalEmail: string }) {
+    return this.usersService.updatePaypalEmail(req.user.id, body.paypalEmail);
+  }
+
+  @Delete('me')
+  @ApiOperation({ summary: 'Désactiver le compte' })
+  deactivateMe(@Req() req: any) {
+    return this.usersService.deactivateAccount(req.user.id);
+  }
+
   @Get('me/notifications')
   @ApiOperation({ summary: 'Notifications passager (alias)' })
   getNotificationsAlias(@Req() req: any) {

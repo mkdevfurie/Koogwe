@@ -5,6 +5,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { AppGateway } from '../common/websocket.gateway';
 import { MailService } from '../mail/mail.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { WalletService } from '../wallet/wallet.service';
 import { randomInt } from 'crypto'; // ✅ FIX #9 : crypto.randomInt (sécurisé)
 
 function calculatePrice(params: {
@@ -80,6 +82,8 @@ export class RidesService {
     private prisma: PrismaService,
     private gateway: AppGateway,
     private mail: MailService,
+    private notifications: NotificationsService,
+    private wallet: WalletService,
   ) {}
 
   async createRide(passengerId: string, data: any) {
@@ -150,6 +154,24 @@ export class RidesService {
       }, passenger.language).catch(() => {});
     }
 
+    // Notification in-app (+ push si FCM configuré) vers chauffeurs en ligne.
+    const onlineDrivers = await this.prisma.driverProfile.findMany({
+      where: {
+        isOnline: true,
+        adminApproved: true,
+        vehicleType: vehicleType as any,
+      },
+      select: { userId: true },
+      take: 200,
+    });
+    await Promise.all(
+      onlineDrivers.map((d) =>
+        this.notifications
+          .notifyDriverNewRide(d.userId, ride.id, ride.pickupAddress ?? 'Point de départ')
+          .catch(() => undefined),
+      ),
+    );
+
     return ride;
   }
 
@@ -219,13 +241,21 @@ export class RidesService {
           select: {
             licensePlate: true, vehicleMake: true, vehicleModel: true,
             vehicleColor: true, rating: true,
+            currentLat: true, currentLng: true,
           },
         },
       },
     });
 
+    const driverLat = driver?.driverProfile?.currentLat ?? null;
+    const driverLng = driver?.driverProfile?.currentLng ?? null;
+
     this.gateway.server.to(`ride:${rideId}`).emit('ride:accepted', {
       rideId, driverId, status: 'ACCEPTED',
+      pickupLat: updated.pickupLat,
+      pickupLng: updated.pickupLng,
+      dropoffLat: updated.dropoffLat,
+      dropoffLng: updated.dropoffLng,
       driver: {
         name: `${driver?.firstName ?? ''} ${driver?.lastName ?? ''}`.trim(),
         phone: driver?.phone,
@@ -233,6 +263,8 @@ export class RidesService {
         plate: driver?.driverProfile?.licensePlate,
         vehicle: `${driver?.driverProfile?.vehicleColor ?? ''} ${driver?.driverProfile?.vehicleMake ?? ''} ${driver?.driverProfile?.vehicleModel ?? ''}`.trim(),
         rating: driver?.driverProfile?.rating,
+        lat: driverLat,
+        lng: driverLng,
       },
     });
 
@@ -252,6 +284,13 @@ export class RidesService {
         },
       }, passenger.language).catch(() => {});
     }
+
+    const driverName = `${driver?.firstName ?? 'Votre'} chauffeur`.trim();
+    await this.notifications.notifyRideAccepted(
+      updated.passengerId,
+      rideId,
+      driverName,
+    ).catch(() => {});
 
     return updated;
   }
@@ -277,7 +316,42 @@ export class RidesService {
     });
 
     this.gateway.server.to(`ride:${rideId}`).emit('ride:status', { rideId, status });
+
+    const statusMessages: Record<string, string> = {
+      DRIVER_EN_ROUTE: 'Votre chauffeur est en route.',
+      ARRIVED: 'Votre chauffeur est arrivé.',
+      IN_PROGRESS: 'La course a commencé.',
+      COMPLETED: 'Course terminée. Merci d\'avoir voyagé avec Koogwe.',
+      CANCELLED: 'La course a été annulée.',
+    };
+    const msg = statusMessages[status] ?? `Statut : ${status}`;
+
+    if (ride.passengerId) {
+      await this.notifications.notifyRideStatus(ride.passengerId, rideId, status, msg).catch(() => {});
+    }
+    if (ride.driverId && ride.driverId !== requesterId) {
+      await this.notifications.notifyRideStatus(ride.driverId, rideId, status, msg).catch(() => {});
+    } else if (ride.driverId && status === 'CANCELLED') {
+      await this.notifications.notifyRideStatus(ride.driverId, rideId, status, msg).catch(() => {});
+    }
+
     return updated;
+  }
+
+  async addTip(rideId: string, passengerId: string, amount: number) {
+    const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Course introuvable');
+    if (ride.passengerId !== passengerId) throw new ForbiddenException('Non autorisé');
+    if (ride.status !== 'COMPLETED') {
+      throw new BadRequestException('Pourboire possible uniquement après la course');
+    }
+    if (!ride.driverId) throw new BadRequestException('Aucun chauffeur associé');
+
+    const result = await this.wallet.transferTip(passengerId, ride.driverId, rideId, amount);
+    if (!result.success) throw new BadRequestException(result.message);
+
+    await this.notifications.notifyTipReceived(ride.driverId, amount, rideId).catch(() => {});
+    return result;
   }
 
   async verifyPin(rideId: string, driverId: string, pin: string) {
@@ -298,6 +372,45 @@ export class RidesService {
       },
       orderBy: { requestedAt: 'desc' },
       take: 50,
+    });
+  }
+
+  async getActiveRideForUser(userId: string) {
+    const activeStatuses = [
+      'REQUESTED',
+      'ACCEPTED',
+      'DRIVER_EN_ROUTE',
+      'ARRIVED',
+      'IN_PROGRESS',
+    ] as const;
+
+    return this.prisma.ride.findFirst({
+      where: {
+        OR: [{ passengerId: userId }, { driverId: userId }],
+        status: { in: [...activeStatuses] },
+      },
+      orderBy: { requestedAt: 'desc' },
+      include: {
+        passenger: { select: { id: true, firstName: true, phone: true, avatarUrl: true } },
+        driver: {
+          select: {
+            id: true,
+            firstName: true,
+            phone: true,
+            avatarUrl: true,
+            driverProfile: {
+              select: {
+                rating: true,
+                licensePlate: true,
+                vehicleMake: true,
+                vehicleModel: true,
+                currentLat: true,
+                currentLng: true,
+              },
+            },
+          },
+        },
+      },
     });
   }
 }

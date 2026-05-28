@@ -38,6 +38,11 @@ export class VerifyOtpAndPasswordDto {
   @IsString()
   @MinLength(8, { message: 'Le mot de passe doit contenir au moins 8 caractères' })
   password: string;
+
+  @ApiPropertyOptional({ enum: ['passenger', 'driver'], description: 'App d\'inscription' })
+  @IsOptional()
+  @IsIn(['passenger', 'driver'])
+  registerAs?: 'passenger' | 'driver';
 }
 
 export class LoginPasswordDto {

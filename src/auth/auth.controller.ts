@@ -124,6 +124,16 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: "Retourne le profil de l'utilisateur connecté" })
   async me(@Req() req: any) {
-    return req.user;
+    const user = req.user;
+    const profile = user.driverProfile;
+    return {
+      ...user,
+      hasDriver: !!profile,
+      driverStatus: profile?.adminApproved
+        ? 'APPROVED'
+        : profile
+          ? 'PENDING'
+          : null,
+    };
   }
 }

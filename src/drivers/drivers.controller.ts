@@ -33,6 +33,21 @@ export class DriversController {
     return this.driversService.getProfile(req.user.id);
   }
 
+  @Patch('bank-account')
+  @ApiOperation({ summary: 'Enregistrer le RIB du chauffeur (retraits)' })
+  updateBankAccount(
+    @Req() req: any,
+    @Body() body: { bankAccountHolder?: string; bankIban?: string; bankBic?: string },
+  ) {
+    return this.driversService.updateBankAccount(req.user.id, body);
+  }
+
+  @Get('bank-account')
+  @ApiOperation({ summary: 'Lire le RIB enregistré' })
+  getBankAccount(@Req() req: any) {
+    return this.driversService.getBankAccount(req.user.id);
+  }
+
   // 🔧 FIX : route /verify-face supprimée (doublon avec FaceVerificationController)
   @Get('face-status')
   @ApiOperation({ summary: 'Statut vérification faciale' })

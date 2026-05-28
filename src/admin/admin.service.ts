@@ -297,7 +297,7 @@ export class AdminService {
       include: { driverProfile: true, documents: true },
     });
 
-    if (!user || user.role !== 'DRIVER' || !user.driverProfile) return;
+    if (!user || !user.driverProfile) return;
 
     const allRequiredApproved = REQUIRED_DRIVER_DOCS.every((r) =>
       user.documents.some(

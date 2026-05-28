@@ -33,9 +33,133 @@ export class WalletService {
     if (stripeMethodId?.startsWith('pm_mock_')) {
       throw new BadRequestException('Méthode de paiement mock interdite en production');
     }
-    if (paymentIntentId?.startsWith('pi_mock_')) {
+    if (paymentIntentId?.startsWith('pi_mock_') || paymentIntentId?.startsWith('seti_mock_')) {
       throw new BadRequestException('Intent de paiement mock interdit en production');
     }
+  }
+
+  private getStripe(): any | null {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    if (!stripeKey) return null;
+    return require('stripe')(stripeKey);
+  }
+
+  getStripeConfig(): { enabled: boolean; publishableKey: string | null; mode: 'test' | 'live' } {
+    const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY?.trim() || null;
+    const hasSecret = !!process.env.STRIPE_SECRET_KEY?.trim();
+    return {
+      enabled: hasSecret && !!publishableKey,
+      publishableKey,
+      mode: this.isProduction() ? 'live' : 'test',
+    };
+  }
+
+  async getOrCreateStripeCustomer(userId: string): Promise<string> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, stripeCustomerId: true },
+    });
+    if (!user) throw new BadRequestException('Utilisateur introuvable');
+    if (user.stripeCustomerId) return user.stripeCustomerId;
+
+    const stripe = this.getStripe();
+    if (!stripe) throw new BadRequestException('Stripe non configuré');
+
+    const customer = await stripe.customers.create({
+      email: user.email,
+      metadata: { userId },
+    });
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { stripeCustomerId: customer.id },
+    });
+
+    return customer.id;
+  }
+
+  async createSetupIntent(userId: string): Promise<{
+    clientSecret: string;
+    setupIntentId: string;
+    mock: boolean;
+  }> {
+    this.assertStripeConfigured();
+    const stripe = this.getStripe();
+
+    if (!stripe) {
+      if (this.isProduction()) {
+        throw new BadRequestException('Stripe non configuré');
+      }
+      const mockId = `seti_mock_${userId}_${Date.now()}`;
+      return {
+        clientSecret: `${mockId}_secret_mock`,
+        setupIntentId: mockId,
+        mock: true,
+      };
+    }
+
+    const customerId = await this.getOrCreateStripeCustomer(userId);
+    const intent = await stripe.setupIntents.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      usage: 'off_session',
+      metadata: { userId },
+    });
+
+    return {
+      clientSecret: intent.client_secret as string,
+      setupIntentId: intent.id,
+      mock: false,
+    };
+  }
+
+  async confirmCardFromSetupIntent(userId: string, setupIntentId: string) {
+    this.assertNotMockPayment(undefined, setupIntentId);
+
+    if (setupIntentId.startsWith('seti_mock_')) {
+      if (this.isProduction()) {
+        throw new BadRequestException('Mock interdit en production');
+      }
+      return this.saveDevMockCard(userId, `pm_mock_${userId}_${Date.now()}`);
+    }
+
+    const stripe = this.getStripe();
+    if (!stripe) throw new BadRequestException('Stripe non configuré');
+
+    const intent = await stripe.setupIntents.retrieve(setupIntentId);
+    if (intent.metadata?.userId && intent.metadata.userId !== userId) {
+      throw new ForbiddenException('SetupIntent invalide pour cet utilisateur');
+    }
+    if (intent.status !== 'succeeded') {
+      throw new BadRequestException('Enregistrement carte non confirmé');
+    }
+
+    const pmId =
+      typeof intent.payment_method === 'string'
+        ? intent.payment_method
+        : intent.payment_method?.id;
+    if (!pmId) throw new BadRequestException('Aucune carte associée');
+
+    return this.saveCard(userId, pmId);
+  }
+
+  private async saveDevMockCard(userId: string, stripeMethodId: string) {
+    const brand = stripeMethodId.includes('master') ? 'mastercard' : 'visa';
+    await this.prisma.savedCard.updateMany({
+      where: { userId, isDefault: true },
+      data: { isDefault: false },
+    });
+    return this.prisma.savedCard.create({
+      data: {
+        userId,
+        stripeMethodId,
+        brand,
+        last4: '4242',
+        expMonth: 12,
+        expYear: new Date().getFullYear() + 3,
+        isDefault: true,
+      },
+    });
   }
 
   /**
@@ -286,7 +410,7 @@ export class WalletService {
       const intent = await stripe.paymentIntents.create({
         amount: Math.round(amount * 100),
         currency: 'eur',
-        metadata: { userId },
+        metadata: { userId, purpose: 'wallet_recharge' },
       });
       return { clientSecret: intent.client_secret, paymentIntentId: intent.id };
     } catch (e) {
@@ -327,19 +451,39 @@ export class WalletService {
       return { success: false, balance: 0 };
     }
 
-    const wallet = await this.prisma.wallet.update({
-      where: { userId: resolvedUserId },
-      data: { balance: { increment: amount } },
+    const alreadyCredited = await this.prisma.transaction.findFirst({
+      where: {
+        userId: resolvedUserId,
+        type: 'RECHARGE',
+        status: 'COMPLETED',
+        externalRef: paymentIntentId,
+      },
+      select: { id: true },
     });
-  await this.prisma.transaction.create({
-  data: { 
-    userId: resolvedUserId, 
-    type: 'RECHARGE', 
-    amount, 
-    status: 'COMPLETED', 
-    externalRef: paymentIntentId,   // ← Utilise externalRef au lieu de stripePaymentId
-  },
-});
+    if (alreadyCredited) {
+      const existingWallet = await this.prisma.wallet.findUnique({
+        where: { userId: resolvedUserId },
+      });
+      return { success: true, balance: existingWallet?.balance ?? 0 };
+    }
+
+    const [wallet] = await this.prisma.$transaction([
+      this.prisma.wallet.upsert({
+        where: { userId: resolvedUserId },
+        create: { userId: resolvedUserId, balance: amount },
+        update: { balance: { increment: amount } },
+      }),
+      this.prisma.transaction.create({
+        data: {
+          userId: resolvedUserId,
+          type: 'RECHARGE',
+          amount,
+          status: 'COMPLETED',
+          externalRef: paymentIntentId,
+        },
+      }),
+    ]);
+
     return { success: true, balance: wallet.balance };
   }
 
@@ -398,15 +542,33 @@ export class WalletService {
   async saveCard(userId: string, stripeMethodId: string) {
     try {
       this.assertNotMockPayment(stripeMethodId);
-      const stripeKey = process.env.STRIPE_SECRET_KEY;
-      if (!stripeKey) throw new Error('Stripe not configured');
-      const stripe = require('stripe')(stripeKey);
+      const stripe = this.getStripe();
 
-      // 1. Récupérer les détails de la carte via Stripe
+      if (!stripe) {
+        if (this.isProduction()) {
+          throw new BadRequestException('Stripe non configuré');
+        }
+        return this.saveDevMockCard(userId, stripeMethodId);
+      }
+
+      const customerId = await this.getOrCreateStripeCustomer(userId);
       const method = await stripe.paymentMethods.retrieve(stripeMethodId);
       const card = method.card;
+      if (!card) throw new BadRequestException('Méthode de paiement invalide');
 
-      // 2. Enregistrer dans la DB
+      try {
+        await stripe.paymentMethods.attach(stripeMethodId, { customer: customerId });
+      } catch (attachErr: any) {
+        if (!attachErr?.message?.includes('already been attached')) {
+          throw attachErr;
+        }
+      }
+
+      await this.prisma.savedCard.updateMany({
+        where: { userId, isDefault: true },
+        data: { isDefault: false },
+      });
+
       const savedCard = await this.prisma.savedCard.create({
         data: {
           userId,
@@ -415,13 +577,12 @@ export class WalletService {
           last4: card.last4,
           expMonth: card.exp_month,
           expYear: card.exp_year,
-          isDefault: true, // Par défaut la nouvelle carte devient la principale
+          isDefault: true,
         },
       });
 
-      // 3. Envoyer l'email
       const user = await this.prisma.user.findUnique({ where: { id: userId } });
-      if (user && user.email) {
+      if (user?.email) {
         await this.mailService.sendCardRegistered(user.email, card.brand, card.last4, user.language);
       }
 
@@ -439,7 +600,125 @@ export class WalletService {
     });
   }
 
+  async handleStripeWebhook(rawBody: Buffer, signature: string): Promise<void> {
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!stripeKey || !webhookSecret) {
+      throw new BadRequestException('Webhook Stripe non configuré');
+    }
+
+    const stripe = require('stripe')(stripeKey);
+    const event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+
+    if (event.type === 'payment_intent.succeeded') {
+      const intent = event.data.object;
+      const userId = intent.metadata?.userId as string | undefined;
+      const purpose = intent.metadata?.purpose as string | undefined;
+
+      if (purpose === 'wallet_recharge' && userId) {
+        const ref = `stripe_evt_${event.id}`;
+        const existing = await this.prisma.transaction.findFirst({
+          where: { reference: ref },
+        });
+        if (existing) return;
+
+        const amount = intent.amount / 100;
+        await this.prisma.$transaction([
+          this.prisma.wallet.upsert({
+            where: { userId },
+            create: { userId, balance: amount },
+            update: { balance: { increment: amount } },
+          }),
+          this.prisma.transaction.create({
+            data: {
+              userId,
+              type: 'RECHARGE',
+              amount,
+              status: 'COMPLETED',
+              paymentMethod: 'CARD',
+              reference: ref,
+              externalRef: intent.id,
+            },
+          }),
+        ]);
+      }
+    }
+  }
+
+  async transferTip(
+    passengerId: string,
+    driverId: string,
+    rideId: string,
+    amount: number,
+  ): Promise<{ success: boolean; message: string }> {
+    if (amount <= 0 || amount > 200) {
+      return { success: false, message: 'Montant de pourboire invalide' };
+    }
+
+    const wallet = await this.prisma.wallet.findUnique({ where: { userId: passengerId } });
+    if (!wallet || wallet.balance < amount) {
+      return { success: false, message: 'Solde insuffisant pour le pourboire' };
+    }
+
+    const share = amount;
+    const ref = `tip_${rideId}_${Date.now()}`;
+
+    await this.prisma.$transaction([
+      this.prisma.wallet.update({
+        where: { userId: passengerId },
+        data: { balance: { decrement: amount } },
+      }),
+      this.prisma.wallet.upsert({
+        where: { userId: driverId },
+        create: { userId: driverId, balance: share },
+        update: { balance: { increment: share } },
+      }),
+      this.prisma.transaction.create({
+        data: {
+          userId: passengerId,
+          type: 'PAYMENT',
+          amount: -amount,
+          status: 'COMPLETED',
+          rideId,
+          paymentMethod: 'WALLET',
+          reference: ref,
+        },
+      }),
+      this.prisma.transaction.create({
+        data: {
+          userId: driverId,
+          type: 'RECHARGE',
+          amount: share,
+          status: 'COMPLETED',
+          rideId,
+          paymentMethod: 'WALLET',
+          reference: ref,
+        },
+      }),
+      this.prisma.ride.update({
+        where: { id: rideId },
+        data: { tipAmount: amount },
+      }),
+    ]);
+
+    return { success: true, message: 'Pourboire envoyé' };
+  }
+
   async deleteCard(userId: string, cardId: string) {
+    const card = await this.prisma.savedCard.findFirst({
+      where: { id: cardId, userId },
+    });
+    if (!card) throw new BadRequestException('Carte introuvable');
+
+    const stripe = this.getStripe();
+    if (stripe && card.stripeMethodId && !card.stripeMethodId.startsWith('pm_mock_')) {
+      try {
+        await stripe.paymentMethods.detach(card.stripeMethodId);
+      } catch (e) {
+        this.logger.warn(`Stripe detach failed for ${card.stripeMethodId}: ${(e as Error).message}`);
+      }
+    }
+
     return this.prisma.savedCard.delete({
       where: { id: cardId, userId },
     });
