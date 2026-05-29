@@ -1,45 +1,15 @@
 // src/rides/rides.service.ts
 import {
   Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger,
+  HttpException, HttpStatus,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppGateway } from '../common/websocket.gateway';
 import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WalletService } from '../wallet/wallet.service';
+import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { randomInt } from 'crypto'; // ✅ FIX #9 : crypto.randomInt (sécurisé)
-
-function calculatePrice(params: {
-  distanceKm: number; durationMin: number; vehicleType: string;
-}): number {
-  const { distanceKm, durationMin, vehicleType } = params;
-
-  const PRISE_EN_CHARGE = Number(process.env.PRICING_PICKUP_FEE ?? 3);
-  const TARIF_KM: Record<string, number> = {
-    MOTO:    Number(process.env.PRICING_KM_MOTO    ?? 1.0),
-    ECO:     Number(process.env.PRICING_KM_ECO     ?? 1.2),
-    CONFORT: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
-    VAN:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
-    BERLINE: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
-    SUV:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
-    LUXE:    Number(process.env.PRICING_KM_LUXE    ?? 2.5),
-  };
-  const TARIF_MIN = Number(process.env.PRICING_MINUTE_RATE ?? 0.30);
-  const MINIMUM   = Number(process.env.PRICING_MIN_PRICE   ?? 7);
-
-  const vt = vehicleType.toUpperCase();
-  const tarifKm = TARIF_KM[vt] ?? TARIF_KM['ECO'];
-
-  const hour = new Date().getHours();
-  let coeffHoraire = 1.0;
-  if (hour >= 7 && hour <= 9)   coeffHoraire = 1.3;
-  if (hour >= 17 && hour <= 20) coeffHoraire = 1.3;
-  if (hour >= 22 || hour <= 5)  coeffHoraire = 1.4;
-
-  const prixBase = PRISE_EN_CHARGE + distanceKm * tarifKm + durationMin * TARIF_MIN;
-  const prixFinal = Math.max(prixBase * coeffHoraire, MINIMUM);
-  return Math.round(prixFinal * 100) / 100;
-}
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -54,6 +24,29 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 }
 
 const VALID_VEHICLE_TYPES = ['MOTO', 'ECO', 'CONFORT', 'VAN', 'BERLINE', 'SUV', 'LUXE'];
+const PIN_MAX_ATTEMPTS = 5;
+
+/** Le PIN n'est visible que par le passager (ou admin). */
+function sanitizeRideForViewer<T extends Record<string, unknown>>(
+  ride: T,
+  viewerId: string,
+  viewerRole?: string,
+): T {
+  if (!ride) return ride;
+  if (viewerRole === 'ADMIN') return ride;
+  if (ride.passengerId === viewerId) {
+    const { pinAttempts: _a, ...rest } = ride;
+    return rest as T;
+  }
+  const { pinCode: _pin, pinAttempts: _a, ...rest } = ride;
+  return rest as T;
+}
+
+function stripPinFields<T extends Record<string, unknown>>(ride: T): T {
+  if (!ride) return ride;
+  const { pinCode: _pin, pinAttempts: _a, ...rest } = ride;
+  return rest as T;
+}
 
 const ALLOWED_STATUS_TRANSITIONS: Record<string, string[]> = {
   REQUESTED: ['ACCEPTED', 'CANCELLED'],
@@ -84,6 +77,7 @@ export class RidesService {
     private mail: MailService,
     private notifications: NotificationsService,
     private wallet: WalletService,
+    private platformConfig: PlatformConfigService,
   ) {}
 
   async createRide(passengerId: string, data: any) {
@@ -106,7 +100,13 @@ export class RidesService {
     let vehicleType = (data.vehicleType || 'ECO').toString().toUpperCase();
     if (!VALID_VEHICLE_TYPES.includes(vehicleType)) vehicleType = 'ECO';
 
-    const estimatedPrice = calculatePrice({ distanceKm, durationMin, vehicleType });
+    const estimatedPrice = await this.platformConfig.calculatePriceWithZones({
+      distanceKm,
+      durationMin,
+      vehicleType,
+      pickupLat: data.pickupLat,
+      pickupLng: data.pickupLng,
+    });
 
     const ride = await this.prisma.ride.create({
       data: {
@@ -127,9 +127,24 @@ export class RidesService {
       },
     });
 
-    // ✅ FIX #6 : émettre uniquement aux chauffeurs disponibles du bon type de véhicule
-    // (pas à tous les clients connectés, y compris les passagers)
-    this.gateway.server.to(`drivers:${vehicleType}`).emit('ride:new', {
+    const radiusKm = await this.platformConfig.getDriverSearchRadiusKm();
+    const onlineDrivers = await this.prisma.driverProfile.findMany({
+      where: {
+        isOnline: true,
+        adminApproved: true,
+        vehicleType: vehicleType as any,
+      },
+      select: { userId: true, currentLat: true, currentLng: true },
+      take: 200,
+    });
+    const eligibleDrivers = this.platformConfig.filterDriversByRadius(
+      onlineDrivers,
+      ride.pickupLat,
+      ride.pickupLng,
+      radiusKm,
+    );
+
+    const ridePayload = {
       id: ride.id,
       pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
@@ -138,7 +153,12 @@ export class RidesService {
       estimatedPrice: ride.estimatedPrice,
       vehicleType: ride.vehicleType,
       requestedAt: ride.requestedAt,
-    });
+      maxDistanceKm: radiusKm,
+    };
+
+    for (const d of eligibleDrivers) {
+      this.gateway.server.to(`user:${d.userId}`).emit('ride:new', ridePayload);
+    }
 
     const passenger = await this.prisma.user.findUnique({
       where: { id: passengerId },
@@ -154,18 +174,9 @@ export class RidesService {
       }, passenger.language).catch(() => {});
     }
 
-    // Notification in-app (+ push si FCM configuré) vers chauffeurs en ligne.
-    const onlineDrivers = await this.prisma.driverProfile.findMany({
-      where: {
-        isOnline: true,
-        adminApproved: true,
-        vehicleType: vehicleType as any,
-      },
-      select: { userId: true },
-      take: 200,
-    });
+    // Notifications uniquement aux chauffeurs dans le rayon admin
     await Promise.all(
-      onlineDrivers.map((d) =>
+      eligibleDrivers.map((d) =>
         this.notifications
           .notifyDriverNewRide(d.userId, ride.id, ride.pickupAddress ?? 'Point de départ')
           .catch(() => undefined),
@@ -199,17 +210,19 @@ export class RidesService {
     });
 
     if (driverProfile.currentLat && driverProfile.currentLng) {
-      const radiusKm = Number(process.env.DRIVER_SEARCH_RADIUS_KM ?? 30);
-      return allRequested.filter((ride) => {
-        const dist = haversineKm(
-          driverProfile.currentLat!,
-          driverProfile.currentLng!,
-          ride.pickupLat, ride.pickupLng,
-        );
-        return dist <= radiusKm;
-      });
+      const radiusKm = await this.platformConfig.getDriverSearchRadiusKm();
+      return allRequested
+        .filter((ride) => {
+          const dist = haversineKm(
+            driverProfile.currentLat!,
+            driverProfile.currentLng!,
+            ride.pickupLat, ride.pickupLng,
+          );
+          return dist <= radiusKm;
+        })
+        .map(stripPinFields);
     }
-    return allRequested;
+    return allRequested.map(stripPinFields);
   }
 
   async acceptRide(rideId: string, driverId: string) {
@@ -292,7 +305,7 @@ export class RidesService {
       driverName,
     ).catch(() => {});
 
-    return updated;
+    return sanitizeRideForViewer(updated, driverId);
   }
 
   async updateRideStatus(rideId: string, requesterId: string, status: string, cancelReason?: string) {
@@ -335,7 +348,7 @@ export class RidesService {
       await this.notifications.notifyRideStatus(ride.driverId, rideId, status, msg).catch(() => {});
     }
 
-    return updated;
+    return sanitizeRideForViewer(updated, requesterId);
   }
 
   async addTip(rideId: string, passengerId: string, amount: number) {
@@ -358,13 +371,46 @@ export class RidesService {
     const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Course introuvable');
     if (ride.driverId !== driverId) throw new ForbiddenException('Non autorisé');
-    if (ride.pinCode !== pin) throw new BadRequestException('Code PIN incorrect');
+    if (ride.status !== 'ARRIVED') {
+      throw new BadRequestException('Le PIN ne peut être saisi qu\'une fois le passager marqué comme arrivé');
+    }
+    if (ride.pinAttempts >= PIN_MAX_ATTEMPTS) {
+      throw new HttpException(
+        'Trop de tentatives incorrectes. Contactez le support ou le passager.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
 
-    return this.updateRideStatus(rideId, driverId, 'IN_PROGRESS');
+    if (ride.pinCode !== pin) {
+      const updated = await this.prisma.ride.update({
+        where: { id: rideId },
+        data: { pinAttempts: { increment: 1 } },
+      });
+      const remaining = PIN_MAX_ATTEMPTS - updated.pinAttempts;
+      if (remaining <= 0) {
+        throw new HttpException(
+          'Trop de tentatives incorrectes. Contactez le support ou le passager.',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+      throw new BadRequestException(`Code PIN incorrect. ${remaining} tentative(s) restante(s).`);
+    }
+
+    await this.prisma.ride.update({
+      where: { id: rideId },
+      data: { pinAttempts: 0 },
+    });
+
+    const updated = await this.updateRideStatus(rideId, driverId, 'IN_PROGRESS');
+    return sanitizeRideForViewer(updated, driverId);
+  }
+
+  sanitizeRideForUser(ride: Record<string, unknown>, viewerId: string, viewerRole?: string) {
+    return sanitizeRideForViewer(ride, viewerId, viewerRole);
   }
 
   async getUserRides(userId: string) {
-    return this.prisma.ride.findMany({
+    const rides = await this.prisma.ride.findMany({
       where: { OR: [{ passengerId: userId }, { driverId: userId }] },
       include: {
         passenger: { select: { id: true, firstName: true, avatarUrl: true } },
@@ -373,6 +419,7 @@ export class RidesService {
       orderBy: { requestedAt: 'desc' },
       take: 50,
     });
+    return rides.map((r) => sanitizeRideForViewer(r, userId));
   }
 
   async getActiveRideForUser(userId: string) {
@@ -384,7 +431,7 @@ export class RidesService {
       'IN_PROGRESS',
     ] as const;
 
-    return this.prisma.ride.findFirst({
+    const ride = await this.prisma.ride.findFirst({
       where: {
         OR: [{ passengerId: userId }, { driverId: userId }],
         status: { in: [...activeStatuses] },
@@ -412,5 +459,7 @@ export class RidesService {
         },
       },
     });
+    if (!ride) return null;
+    return sanitizeRideForViewer(ride, userId);
   }
 }

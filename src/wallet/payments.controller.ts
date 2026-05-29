@@ -14,6 +14,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WalletService } from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { PlatformConfigService } from '../platform-config/platform-config.service';
 
 @ApiTags('Payments (Compatibility)')
 @ApiBearerAuth()
@@ -25,6 +26,7 @@ export class PaymentsController {
   constructor(
     private readonly walletService: WalletService,
     private readonly prisma: PrismaService,
+    private readonly platformConfig: PlatformConfigService,
   ) {}
 
   @Post('authorize')
@@ -72,6 +74,8 @@ export class PaymentsController {
     const paymentMethod = (body.paymentMethod || body.method || 'CASH').toUpperCase();
     this.logger.log(`[Payments] Finalize user=${userId} ride=${rideId} method=${paymentMethod}`);
 
+    await this.assertPaymentMethodAllowed(paymentMethod);
+
     if (paymentMethod === 'WALLET') {
       const result = await this.walletService.payRideFromWallet(userId, rideId);
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
@@ -81,13 +85,6 @@ export class PaymentsController {
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
     }
     if (paymentMethod === 'PAYPAL') {
-      if ((process.env.PAYPAL_ENABLED ?? 'false').toLowerCase() !== 'true') {
-        return {
-          success: false,
-          status: 'FAILED',
-          message: 'PayPal indisponible en production sur cette version',
-        };
-      }
       const result = await this.walletService.payRideFromPaypal(userId, rideId);
       return { ...result, status: result.success ? 'COMPLETED' : 'FAILED' };
     }
@@ -141,5 +138,19 @@ export class PaymentsController {
   @Post('transfer-driver')
   async transferDriver() {
     return { success: true, message: 'Transfert effectué' };
+  }
+
+  private async assertPaymentMethodAllowed(method: string) {
+    const cfg = await this.platformConfig.getPayments();
+    const m = method.toUpperCase();
+    const blocked: Record<string, boolean> = {
+      CARD: !cfg.stripeEnabled,
+      WALLET: !cfg.walletEnabled,
+      CASH: !cfg.cashEnabled,
+      PAYPAL: !cfg.paypalEnabled,
+    };
+    if (blocked[m]) {
+      throw new BadRequestException(`Méthode de paiement ${m} désactivée par l'administrateur`);
+    }
   }
 }

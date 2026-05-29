@@ -4,6 +4,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -17,6 +18,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
 import { WalletService } from '../wallet/wallet.service';
+import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 // Guard qui vérifie que l'utilisateur est bien ADMIN
@@ -41,6 +43,7 @@ export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly walletService: WalletService,
+    private readonly platformConfig: PlatformConfigService,
   ) {}
 
   // ─── Dashboard ─────────────────────────────────────────────────────────────
@@ -215,40 +218,115 @@ export class AdminController {
       durationMin: number;
       vehicleType: string;
       zone?: string;
-      timeOfDay?: string;
-      trafficLevel?: string;
-      weatherCondition?: string;
+      pickupLat?: number;
+      pickupLng?: number;
       demandLevel?: string;
     },
   ) {
     return this.adminService.estimatePrice(body);
   }
 
-  // ─── Config (retourne des valeurs vides pour compatibilité) ────────────────
+  // ─── Configuration plateforme (persistée en base) ─────────────────────────
 
   @Get('config')
-  getConfig() {
-    return { message: 'Config disponible' };
+  async getConfig() {
+    const [pricing, financials, payments, security, platform] = await Promise.all([
+      this.platformConfig.getPricing(),
+      this.platformConfig.getFinancials(),
+      this.platformConfig.getPayments(),
+      this.platformConfig.getSecurity(),
+      this.platformConfig.getPlatform(),
+    ]);
+    return { pricing, financials, payments, security, platform };
   }
 
   @Get('config/pricing')
   getPricingConfig() {
-    return { basePrice: 2.5, pricePerKm: 1.2, pricePerMin: 0.3 };
+    return this.platformConfig.getPricing();
+  }
+
+  @Patch('config/pricing')
+  @HttpCode(HttpStatus.OK)
+  updatePricingConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updatePricing(body as any);
   }
 
   @Get('config/financials')
   getFinancialsConfig() {
-    return { commissionRate: 0.15 };
+    return this.platformConfig.getFinancials();
+  }
+
+  @Patch('config/financials')
+  @HttpCode(HttpStatus.OK)
+  updateFinancialsConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updateFinancials(body);
   }
 
   @Get('config/security')
   getSecurityConfig() {
-    return { otpMaxAttempts: 5, otpExpiry: 600 };
+    return this.platformConfig.getSecurity();
+  }
+
+  @Patch('config/security')
+  @HttpCode(HttpStatus.OK)
+  updateSecurityConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updateSecurity(body);
   }
 
   @Get('config/payments')
   getPaymentsConfig() {
-    return { methods: ['CASH', 'CARD', 'ORANGE_MONEY'] };
+    return this.platformConfig.getPayments();
+  }
+
+  @Patch('config/payments')
+  @HttpCode(HttpStatus.OK)
+  updatePaymentsConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updatePayments(body as any);
+  }
+
+  @Get('config/platform')
+  getPlatformConfig() {
+    return this.platformConfig.getPlatform();
+  }
+
+  @Patch('config/platform')
+  @HttpCode(HttpStatus.OK)
+  updatePlatformConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updatePlatform(body as any);
+  }
+
+  // ─── Zones chaudes ─────────────────────────────────────────────────────────
+
+  @Get('hot-zones')
+  listHotZones() {
+    return this.platformConfig.listHotZones();
+  }
+
+  @Post('hot-zones')
+  @HttpCode(HttpStatus.CREATED)
+  createHotZone(
+    @Body() body: {
+      name: string;
+      centerLat: number;
+      centerLng: number;
+      radiusKm?: number;
+      surgeMultiplier?: number;
+      isActive?: boolean;
+    },
+  ) {
+    return this.platformConfig.createHotZone(body);
+  }
+
+  @Patch('hot-zones/:id')
+  @HttpCode(HttpStatus.OK)
+  updateHotZone(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.platformConfig.updateHotZone(id, body as any);
+  }
+
+  @Delete('hot-zones/:id')
+  @HttpCode(HttpStatus.OK)
+  deleteHotZone(@Param('id') id: string) {
+    return this.platformConfig.deleteHotZone(id);
   }
 
   // ─── Panics (stub) ─────────────────────────────────────────────────────────

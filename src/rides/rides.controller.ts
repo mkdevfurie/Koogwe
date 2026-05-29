@@ -94,7 +94,7 @@ export class RidesController {
     if (ride.passengerId !== req.user.id && ride.driverId !== req.user.id && req.user.role !== 'ADMIN') {
       throw new NotFoundException('Course introuvable');
     }
-    return ride;
+    return this.ridesService.sanitizeRideForUser(ride, req.user.id, req.user.role);
   }
 
   @Post(':id/accept')

@@ -326,6 +326,7 @@ model Ride {
   distanceKm        Float?
   durationMin       Int?
   pinCode           String
+  pinAttempts       Int           @default(0)
 
   paymentMethod     PaymentMethod @default(CASH)
   isPaid            Boolean       @default(false)
@@ -447,4 +448,33 @@ model SavedPlace {
 
   @@index([userId])
   @@map("saved_places")
+}
+
+/// Configuration globale (singleton id = "default")
+model PlatformSettings {
+  id         String   @id @default("default")
+  pricing    Json     @default("{}")
+  financials Json     @default("{}")
+  payments   Json     @default("{}")
+  security   Json     @default("{}")
+  platform   Json     @default("{}")
+  updatedAt  DateTime @updatedAt
+
+  @@map("platform_settings")
+}
+
+/// Zones à forte demande (surge / visibilité)
+model HotZone {
+  id              String   @id @default(uuid())
+  name            String
+  centerLat       Float
+  centerLng       Float
+  radiusKm        Float    @default(2)
+  surgeMultiplier Float    @default(1.2)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("hot_zones")
 }

@@ -3,6 +3,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { AppGateway } from '../common/websocket.gateway';
+import { PlatformConfigService } from '../platform-config/platform-config.service';
 import { DocumentStatus, DocumentType } from '@prisma/client';
 
 // Documents requis pour qu'un chauffeur soit auto-activé après approbation
@@ -21,6 +22,7 @@ export class AdminService {
     private prisma: PrismaService,
     private mail: MailService,
     private gateway: AppGateway,
+    private platformConfig: PlatformConfigService,
   ) {}
 
   private formatUserDisplayName(user?: {
@@ -466,87 +468,44 @@ export class AdminService {
     return { transactions, total, page, limit };
   }
 
-  // ─── Simulateur de prix ────────────────────────────────────────────────────
-  estimatePrice(params: {
+  // ─── Simulateur de prix (config admin persistée) ───────────────────────────
+  async estimatePrice(params: {
     distanceKm: number;
     durationMin: number;
     vehicleType: string;
     zone?: string;
-    timeOfDay?: string;
-    trafficLevel?: string;
-    weatherCondition?: string;
+    pickupLat?: number;
+    pickupLng?: number;
     demandLevel?: string;
   }) {
-    const {
-      distanceKm, durationMin, vehicleType,
-      zone = 'normal', timeOfDay = 'normal',
-      trafficLevel = 'fluide', weatherCondition = 'normale', demandLevel = 'normale',
-    } = params;
+    const pricing = await this.platformConfig.getPricing();
+    const financials = await this.platformConfig.getFinancials();
+    const estimate = await this.platformConfig.calculatePriceWithZones({
+      distanceKm: params.distanceKm,
+      durationMin: params.durationMin,
+      vehicleType: params.vehicleType,
+      pickupLat: params.pickupLat,
+      pickupLng: params.pickupLng,
+      zone: params.zone,
+      demandLevel: params.demandLevel,
+    });
 
-    const PRISE_EN_CHARGE = Number(process.env.PRICING_PICKUP_FEE ?? 3);
-    const TARIF_KM: Record<string, number> = {
-      MOTO:    Number(process.env.PRICING_KM_MOTO    ?? 1.0),
-      ECO:     Number(process.env.PRICING_KM_ECO     ?? 1.2),
-      CONFORT: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
-      VAN:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
-      BERLINE: Number(process.env.PRICING_KM_CONFORT ?? 1.5),
-      SUV:     Number(process.env.PRICING_KM_VAN     ?? 1.9),
-      LUXE:    Number(process.env.PRICING_KM_LUXE    ?? 2.5),
-    };
-    const TARIF_MIN = Number(process.env.PRICING_MINUTE_RATE ?? 0.30);
-    const MINIMUM   = Number(process.env.PRICING_MIN_PRICE   ?? 7);
-
-    const vt = (vehicleType || 'ECO').toUpperCase();
-    const tarifKm = TARIF_KM[vt] ?? TARIF_KM['ECO'];
-
-    const prixBase = PRISE_EN_CHARGE + distanceKm * tarifKm + durationMin * TARIF_MIN;
-
-    const coeffZone: Record<string, number> = {
-      normal: 1.0, centre: 1.15, aeroport: 1.3, rural: 0.9,
-    };
-    const coeffHoraire: Record<string, number> = {
-      normal: 1.0, pointe: 1.3, nuit: 1.4, creuse: 0.85,
-    };
-    const coeffTrafic: Record<string, number> = {
-      fluide: 1.0, modere: 1.1, dense: 1.25, bloque: 1.5,
-    };
-    const coeffMeteo: Record<string, number> = {
-      normale: 1.0, pluie: 1.1, forte_pluie: 1.25, tempete: 1.5,
-    };
-    const coeffDemande: Record<string, number> = {
-      normale: 1.0, forte: 1.2, tres_forte: 1.5, critique: 2.0,
-    };
-
-    const cZone     = coeffZone[zone]                  ?? 1.0;
-    const cHoraire  = coeffHoraire[timeOfDay]          ?? 1.0;
-    const cTrafic   = coeffTrafic[trafficLevel]        ?? 1.0;
-    const cMeteo    = coeffMeteo[weatherCondition]     ?? 1.0;
-    const cDemande  = coeffDemande[demandLevel]        ?? 1.0;
-    const cTotal    = cZone * cHoraire * cTrafic * cMeteo * cDemande;
-
-    const estimate = Math.max(
-      Math.round(prixBase * cTotal * 100) / 100,
-      MINIMUM,
-    );
-
-    const commission = Number(process.env.COMMISSION_RATE ?? 0.15);
+    const vt = (params.vehicleType || 'ECO').toUpperCase();
+    const tarifKm = pricing.pricePerKm[vt] ?? pricing.pricePerKm['ECO'] ?? 1.2;
+    const platformPct =
+      (Number(financials.platformCommission) || 20) / 100;
 
     return {
       estimate,
-      currency: process.env.CURRENCY ?? 'EUR',
+      currency: pricing.currency,
       breakdown: {
-        priseEnCharge: PRISE_EN_CHARGE,
-        prixDistance:  Math.round(distanceKm * tarifKm * 100) / 100,
-        prixTemps:     Math.round(durationMin * TARIF_MIN * 100) / 100,
-        prixBase:      Math.round(prixBase * 100) / 100,
-        coefficients: {
-          zone: cZone, horaire: cHoraire, trafic: cTrafic,
-          meteo: cMeteo, demande: cDemande, total: Math.round(cTotal * 100) / 100,
-        },
+        priseEnCharge: pricing.pickupFee,
+        prixDistance: Math.round(params.distanceKm * tarifKm * 100) / 100,
+        prixTemps: Math.round(params.durationMin * pricing.pricePerMinute * 100) / 100,
       },
       split: {
-        chauffeur:  Math.round(estimate * (1 - commission) * 100) / 100,
-        plateforme: Math.round(estimate * commission * 100) / 100,
+        chauffeur: Math.round(estimate * (1 - platformPct) * 100) / 100,
+        plateforme: Math.round(estimate * platformPct * 100) / 100,
       },
     };
   }
