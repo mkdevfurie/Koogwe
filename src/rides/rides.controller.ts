@@ -9,6 +9,55 @@ import { AdminService } from '../admin/admin.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function resolveTripMetrics(body: {
+  distanceKm?: number;
+  durationMin?: number;
+  pickupLat?: number;
+  pickupLng?: number;
+  dropoffLat?: number;
+  dropoffLng?: number;
+}): { distanceKm: number; durationMin: number } {
+  let distanceKm =
+    typeof body.distanceKm === 'number' && body.distanceKm > 0
+      ? body.distanceKm
+      : 0;
+  let durationMin =
+    typeof body.durationMin === 'number' && body.durationMin > 0
+      ? Math.round(body.durationMin)
+      : 0;
+
+  if (
+    distanceKm <= 0 &&
+    typeof body.pickupLat === 'number' &&
+    typeof body.pickupLng === 'number' &&
+    typeof body.dropoffLat === 'number' &&
+    typeof body.dropoffLng === 'number'
+  ) {
+    distanceKm = haversineKm(
+      body.pickupLat,
+      body.pickupLng,
+      body.dropoffLat,
+      body.dropoffLng,
+    );
+  }
+  if (durationMin <= 0 && distanceKm > 0) {
+    durationMin = Math.max(1, Math.round((distanceKm / 30) * 60));
+  }
+  return { distanceKm, durationMin };
+}
+
 @ApiTags('Rides')
 @ApiBearerAuth()
 @Controller('rides')
@@ -22,11 +71,25 @@ export class RidesController {
 
   @Post('estimate')
   @HttpCode(HttpStatus.OK)
-  estimatePrice(@Body() body: { distanceKm: number; durationMin: number; vehicleType: string }) {
+  estimatePrice(
+    @Body()
+    body: {
+      distanceKm: number;
+      durationMin: number;
+      vehicleType: string;
+      pickupLat?: number;
+      pickupLng?: number;
+      dropoffLat?: number;
+      dropoffLng?: number;
+    },
+  ) {
+    const metrics = resolveTripMetrics(body);
     return this.adminService.estimatePrice({
-      distanceKm: body.distanceKm,
-      durationMin: body.durationMin,
+      distanceKm: metrics.distanceKm,
+      durationMin: metrics.durationMin,
       vehicleType: body.vehicleType,
+      pickupLat: body.pickupLat,
+      pickupLng: body.pickupLng,
     });
   }
 

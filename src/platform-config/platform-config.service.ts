@@ -269,6 +269,7 @@ export class PlatformConfigService {
     return {
       maintenanceMode: platform.maintenanceMode,
       registrationOpen: platform.registrationOpen,
+      driverSearchRadiusKm: platform.driverSearchRadiusKm,
       payments,
       pricing: {
         currency: pricing.currency,

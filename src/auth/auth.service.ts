@@ -101,6 +101,7 @@ export class AuthService {
 
   private async consumeOtp(email: string, code: string) {
     const normalizedEmail = email.toLowerCase().trim();
+    const normalizedCode = code.trim();
 
     const userBefore = await this.prisma.user.findUnique({
       where: { email: normalizedEmail },
@@ -123,7 +124,7 @@ export class AuthService {
       );
     }
 
-    if (userBefore.otpCode !== code) {
+    if (userBefore.otpCode !== normalizedCode) {
       await this.prisma.user.update({
         where: { email: normalizedEmail },
         data: { otpAttempts: { increment: 1 } },

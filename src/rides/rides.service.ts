@@ -85,12 +85,19 @@ export class RidesService {
       throw new BadRequestException('Coordonnées GPS invalides');
     }
 
-    const distanceKm = haversineKm(
-      data.pickupLat,
-      data.pickupLng,
-      data.dropoffLat,
-      data.dropoffLng,
-    );
+    const clientDistance =
+      typeof data.distanceKm === 'number' && data.distanceKm > 0
+        ? data.distanceKm
+        : 0;
+    const distanceKm =
+      clientDistance > 0
+        ? clientDistance
+        : haversineKm(
+            data.pickupLat,
+            data.pickupLng,
+            data.dropoffLat,
+            data.dropoffLng,
+          );
 
     const durationMin =
       typeof data.durationMin === 'number' && data.durationMin > 0
@@ -151,6 +158,9 @@ export class RidesService {
       pickupLat: ride.pickupLat,
       pickupLng: ride.pickupLng,
       estimatedPrice: ride.estimatedPrice,
+      distanceKm: ride.distanceKm,
+      durationMin: ride.durationMin,
+      paymentMethod: ride.paymentMethod,
       vehicleType: ride.vehicleType,
       requestedAt: ride.requestedAt,
       maxDistanceKm: radiusKm,
