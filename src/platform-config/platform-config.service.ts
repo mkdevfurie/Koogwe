@@ -1,5 +1,10 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  defaultEmailTemplates,
+  EmailTemplateKey,
+  EmailTemplatesConfig,
+} from '../mail/email-templates.defaults';
 
 const SETTINGS_ID = 'default';
 
@@ -127,6 +132,7 @@ export class PlatformConfigService {
             ipWhitelist: false,
           },
           platform: this.defaultPlatform() as object,
+          emails: defaultEmailTemplates() as object,
         },
       });
     }
@@ -255,6 +261,38 @@ export class PlatformConfigService {
       where: { id: SETTINGS_ID },
       create: { id: SETTINGS_ID, security: next as object },
       update: { security: next as object },
+    });
+    this.invalidateCache();
+    return next;
+  }
+
+  async getEmailTemplates(): Promise<EmailTemplatesConfig> {
+    const row = await this.getRow();
+    const defaults = defaultEmailTemplates();
+    const stored = (row as { emails?: unknown }).emails;
+    if (!stored || typeof stored !== 'object') return defaults;
+    const merged = { ...defaults };
+    for (const key of Object.keys(defaults) as EmailTemplateKey[]) {
+      const patch = (stored as Record<string, unknown>)[key];
+      if (patch && typeof patch === 'object') {
+        merged[key] = { ...defaults[key], ...(patch as object) };
+      }
+    }
+    return merged;
+  }
+
+  async updateEmailTemplates(patch: Partial<EmailTemplatesConfig>) {
+    const current = await this.getEmailTemplates();
+    const next = { ...current };
+    for (const key of Object.keys(patch) as EmailTemplateKey[]) {
+      if (patch[key]) {
+        next[key] = { ...current[key], ...patch[key] };
+      }
+    }
+    await this.prisma.platformSettings.upsert({
+      where: { id: SETTINGS_ID },
+      create: { id: SETTINGS_ID, emails: next as object },
+      update: { emails: next as object },
     });
     this.invalidateCache();
     return next;

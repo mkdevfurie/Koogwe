@@ -1,5 +1,5 @@
 // src/admin/admin.service.ts
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { AppGateway } from '../common/websocket.gateway';
@@ -339,7 +339,7 @@ export class AdminService {
 
   // ─── Passagers ─────────────────────────────────────────────────────────────
   async getAllPassengers() {
-    return this.prisma.user.findMany({
+    const rows = await this.prisma.user.findMany({
       where: { role: 'PASSENGER' },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -351,10 +351,16 @@ export class AdminService {
         avatarUrl: true,
         isActive: true,
         isVerified: true,
+        accountStatus: true,
         createdAt: true,
         _count: { select: { passengerRides: true } },
       },
     });
+    return rows.map((p) => ({
+      ...p,
+      name: `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() || p.email,
+      totalRides: p._count.passengerRides,
+    }));
   }
 
   async suspendPassenger(id: string) {
@@ -369,7 +375,7 @@ export class AdminService {
 
   // ─── Courses ───────────────────────────────────────────────────────────────
   async getAllRides(limit = 50) {
-    return this.prisma.ride.findMany({
+    const rows = await this.prisma.ride.findMany({
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: {
@@ -378,6 +384,24 @@ export class AdminService {
         payment: true,
       },
     });
+
+    return rows.map((r) => ({
+      ...r,
+      driver: r.driver
+        ? {
+            name: `${r.driver.firstName ?? ''} ${r.driver.lastName ?? ''}`.trim() || null,
+          }
+        : null,
+      passenger: r.passenger
+        ? {
+            name:
+              `${r.passenger.firstName ?? ''} ${r.passenger.lastName ?? ''}`.trim() ||
+              r.passenger.email,
+            email: r.passenger.email,
+          }
+        : null,
+      price: r.finalPrice ?? r.estimatedPrice ?? 0,
+    }));
   }
 
   async getActiveRides() {
@@ -508,5 +532,108 @@ export class AdminService {
         plateforme: Math.round(estimate * platformPct * 100) / 100,
       },
     };
+  }
+
+  // ─── Suppressions admin ────────────────────────────────────────────────────
+
+  async deleteRide(rideId: string) {
+    const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Course introuvable');
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.deleteMany({ where: { rideId } });
+      await tx.review.deleteMany({ where: { rideId } });
+      await tx.message.deleteMany({ where: { rideId } });
+      await tx.transaction.updateMany({ where: { rideId }, data: { rideId: null } });
+      await tx.ride.delete({ where: { id: rideId } });
+    });
+
+    return { message: 'Course supprimée', id: rideId };
+  }
+
+  async deleteRidesByStatus(status: string) {
+    const allowed = ['REQUESTED', 'CANCELLED'];
+    if (!allowed.includes(status)) {
+      throw new BadRequestException(`Suppression groupée autorisée pour: ${allowed.join(', ')}`);
+    }
+
+    const rides = await this.prisma.ride.findMany({
+      where: { status: status as any },
+      select: { id: true },
+    });
+    const ids = rides.map((r) => r.id);
+    if (!ids.length) return { message: 'Aucune course à supprimer', count: 0 };
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.deleteMany({ where: { rideId: { in: ids } } });
+      await tx.review.deleteMany({ where: { rideId: { in: ids } } });
+      await tx.message.deleteMany({ where: { rideId: { in: ids } } });
+      await tx.transaction.updateMany({ where: { rideId: { in: ids } }, data: { rideId: null } });
+      await tx.ride.deleteMany({ where: { id: { in: ids } } });
+    });
+
+    return { message: `${ids.length} course(s) supprimée(s)`, count: ids.length };
+  }
+
+  async deletePassenger(userId: string) {
+    return this.deleteUserAccount(userId, 'PASSENGER');
+  }
+
+  async deleteDriver(id: string) {
+    const driver = await this.findDriverByIdOrUserId(id);
+    if (!driver) throw new NotFoundException('Chauffeur introuvable');
+    return this.deleteUserAccount(driver.userId, 'DRIVER');
+  }
+
+  async deleteDocument(id: string) {
+    const doc = await this.prisma.document.findUnique({ where: { id } });
+    if (!doc) throw new NotFoundException('Document introuvable');
+    await this.prisma.document.delete({ where: { id } });
+    return { message: 'Document supprimé', id };
+  }
+
+  private async deleteUserAccount(userId: string, expectedRole?: 'PASSENGER' | 'DRIVER') {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+    if (user.role === 'ADMIN') {
+      throw new ForbiddenException('Impossible de supprimer un compte administrateur');
+    }
+    if (expectedRole && user.role !== expectedRole) {
+      throw new BadRequestException(`Ce compte n'est pas un ${expectedRole.toLowerCase()}`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const rideIds = (
+        await tx.ride.findMany({
+          where: { OR: [{ passengerId: userId }, { driverId: userId }] },
+          select: { id: true },
+        })
+      ).map((r) => r.id);
+
+      if (rideIds.length) {
+        await tx.payment.deleteMany({ where: { rideId: { in: rideIds } } });
+        await tx.review.deleteMany({ where: { rideId: { in: rideIds } } });
+        await tx.message.deleteMany({ where: { rideId: { in: rideIds } } });
+        await tx.transaction.updateMany({
+          where: { rideId: { in: rideIds } },
+          data: { rideId: null },
+        });
+        await tx.ride.deleteMany({ where: { id: { in: rideIds } } });
+      }
+
+      await tx.review.deleteMany({
+        where: { OR: [{ authorId: userId }, { targetId: userId }] },
+      });
+      await tx.message.deleteMany({ where: { senderId: userId } });
+      await tx.transaction.deleteMany({ where: { userId } });
+      await tx.payment.deleteMany({ where: { userId } });
+      await tx.notification.deleteMany({ where: { userId } });
+      await tx.document.deleteMany({ where: { userId } });
+      await tx.savedPlace.deleteMany({ where: { userId } });
+      await tx.savedCard.deleteMany({ where: { userId } });
+      await tx.user.delete({ where: { id: userId } });
+    });
+
+    return { message: 'Compte supprimé', id: userId };
   }
 }

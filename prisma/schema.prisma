@@ -458,6 +458,7 @@ model PlatformSettings {
   payments   Json     @default("{}")
   security   Json     @default("{}")
   platform   Json     @default("{}")
+  emails     Json     @default("{}")
   updatedAt  DateTime @updatedAt
 
   @@map("platform_settings")

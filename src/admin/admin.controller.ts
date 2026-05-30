@@ -19,6 +19,9 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
 import { WalletService } from '../wallet/wallet.service';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
+import { MailTemplateService } from '../mail/mail-template.service';
+import { MailService } from '../mail/mail.service';
+import { EmailTemplateKey } from '../mail/email-templates.defaults';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 // Guard qui vérifie que l'utilisateur est bien ADMIN
@@ -44,6 +47,8 @@ export class AdminController {
     private readonly adminService: AdminService,
     private readonly walletService: WalletService,
     private readonly platformConfig: PlatformConfigService,
+    private readonly mailTemplates: MailTemplateService,
+    private readonly mail: MailService,
   ) {}
 
   // ─── Dashboard ─────────────────────────────────────────────────────────────
@@ -104,6 +109,13 @@ export class AdminController {
     return this.adminService.approveOrRejectDriver(id, body.approved, body.adminNotes);
   }
 
+  @Delete('drivers/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Supprimer un chauffeur et son compte' })
+  deleteDriver(@Param('id') id: string) {
+    return this.adminService.deleteDriver(id);
+  }
+
   // ─── Documents ─────────────────────────────────────────────────────────────
 
   @Get('documents')
@@ -130,6 +142,13 @@ export class AdminController {
     return this.adminService.rejectDocument(id, req.user.id, body.reason);
   }
 
+  @Delete('documents/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Supprimer un document' })
+  deleteDocument(@Param('id') id: string) {
+    return this.adminService.deleteDocument(id);
+  }
+
   // ─── Passagers ─────────────────────────────────────────────────────────────
 
   @Get('passengers')
@@ -152,6 +171,13 @@ export class AdminController {
     return this.adminService.activatePassenger(id);
   }
 
+  @Delete('passengers/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Supprimer un passager et son compte' })
+  deletePassenger(@Param('id') id: string) {
+    return this.adminService.deletePassenger(id);
+  }
+
   // ─── Courses ───────────────────────────────────────────────────────────────
 
   @Get('rides')
@@ -164,6 +190,20 @@ export class AdminController {
   @ApiOperation({ summary: 'Courses actives en ce moment' })
   getActiveRides() {
     return this.adminService.getActiveRides();
+  }
+
+  @Delete('rides/bulk')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Supprimer toutes les courses d\'un statut (REQUESTED, CANCELLED)' })
+  deleteRidesBulk(@Query('status') status: string) {
+    return this.adminService.deleteRidesByStatus(status || 'REQUESTED');
+  }
+
+  @Delete('rides/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Supprimer une course' })
+  deleteRide(@Param('id') id: string) {
+    return this.adminService.deleteRide(id);
   }
 
   // ─── Finances ──────────────────────────────────────────────────────────────
@@ -230,14 +270,15 @@ export class AdminController {
 
   @Get('config')
   async getConfig() {
-    const [pricing, financials, payments, security, platform] = await Promise.all([
+    const [pricing, financials, payments, security, platform, emails] = await Promise.all([
       this.platformConfig.getPricing(),
       this.platformConfig.getFinancials(),
       this.platformConfig.getPayments(),
       this.platformConfig.getSecurity(),
       this.platformConfig.getPlatform(),
+      this.platformConfig.getEmailTemplates(),
     ]);
-    return { pricing, financials, payments, security, platform };
+    return { pricing, financials, payments, security, platform, emails };
   }
 
   @Get('config/pricing')
@@ -293,6 +334,47 @@ export class AdminController {
   @HttpCode(HttpStatus.OK)
   updatePlatformConfig(@Body() body: Record<string, unknown>) {
     return this.platformConfig.updatePlatform(body as any);
+  }
+
+  @Get('config/emails')
+  getEmailTemplatesConfig() {
+    return this.platformConfig.getEmailTemplates();
+  }
+
+  @Patch('config/emails')
+  @HttpCode(HttpStatus.OK)
+  updateEmailTemplatesConfig(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updateEmailTemplates(body as any);
+  }
+
+  @Post('config/emails/preview')
+  @HttpCode(HttpStatus.OK)
+  previewEmailTemplate(
+    @Body() body: {
+      key: EmailTemplateKey;
+      language?: string;
+      patch?: Record<string, unknown>;
+    },
+  ) {
+    if (!body?.key) throw new BadRequestException('key requis');
+    return this.mailTemplates.preview(body.key, body.language ?? 'fr', body.patch as any);
+  }
+
+  @Post('config/emails/test')
+  @HttpCode(HttpStatus.OK)
+  async testEmailTemplate(
+    @Body() body: {
+      key: EmailTemplateKey;
+      to: string;
+      language?: string;
+    },
+  ) {
+    if (!body?.key || !body?.to) {
+      throw new BadRequestException('key et to requis');
+    }
+    const rendered = await this.mailTemplates.preview(body.key, body.language ?? 'fr');
+    await this.mail.sendTestEmail(body.to, rendered.subject, rendered.html);
+    return { success: true, message: `Email test envoyé à ${body.to}` };
   }
 
   // ─── Zones chaudes ─────────────────────────────────────────────────────────

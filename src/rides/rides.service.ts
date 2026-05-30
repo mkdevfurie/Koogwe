@@ -206,9 +206,24 @@ export class RidesService {
       throw new ForbiddenException('Compte chauffeur non validé par l\'administrateur');
     }
 
+    const staleHours = 2;
+    const maxAgeMin = 30;
+    const staleCutoff = new Date(Date.now() - staleHours * 60 * 60 * 1000);
+    const freshCutoff = new Date(Date.now() - maxAgeMin * 60 * 1000);
+
+    await this.prisma.ride.updateMany({
+      where: { status: 'REQUESTED', requestedAt: { lt: staleCutoff } },
+      data: {
+        status: 'CANCELLED',
+        cancelReason: 'Expirée — aucun chauffeur disponible',
+        cancelledAt: new Date(),
+      },
+    });
+
     const allRequested = await this.prisma.ride.findMany({
       where: {
         status: 'REQUESTED',
+        requestedAt: { gte: freshCutoff },
         ...(driverProfile.vehicleType ? { vehicleType: driverProfile.vehicleType } : {}),
       },
       include: {
@@ -339,6 +354,12 @@ export class RidesService {
     });
 
     this.gateway.server.to(`ride:${rideId}`).emit('ride:status', { rideId, status });
+    if (ride.passengerId) {
+      this.gateway.server.to(`user:${ride.passengerId}`).emit('ride:status', { rideId, status });
+    }
+    if (ride.driverId) {
+      this.gateway.server.to(`user:${ride.driverId}`).emit('ride:status', { rideId, status });
+    }
 
     const statusMessages: Record<string, string> = {
       DRIVER_EN_ROUTE: 'Votre chauffeur est en route.',
