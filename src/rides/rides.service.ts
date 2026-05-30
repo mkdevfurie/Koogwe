@@ -9,6 +9,7 @@ import { MailService } from '../mail/mail.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { WalletService } from '../wallet/wallet.service';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
+import { PromoService } from '../promos/promo.service';
 import { randomInt } from 'crypto'; // ✅ FIX #9 : crypto.randomInt (sécurisé)
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -78,6 +79,7 @@ export class RidesService {
     private notifications: NotificationsService,
     private wallet: WalletService,
     private platformConfig: PlatformConfigService,
+    private promoService: PromoService,
   ) {}
 
   async createRide(passengerId: string, data: any) {
@@ -115,6 +117,26 @@ export class RidesService {
       pickupLng: data.pickupLng,
     });
 
+    let finalEstimated = estimatedPrice;
+    let promoCodeId: string | undefined;
+    let discountAmount: number | undefined;
+
+    if (data.promoCode) {
+      const passenger = await this.prisma.user.findUnique({
+        where: { id: passengerId },
+        select: { role: true },
+      });
+      const promo = await this.promoService.validate(
+        data.promoCode,
+        passengerId,
+        passenger?.role ?? 'PASSENGER',
+        estimatedPrice,
+      );
+      finalEstimated = promo.finalPrice;
+      promoCodeId = promo.promoId;
+      discountAmount = promo.discountAmount;
+    }
+
     const ride = await this.prisma.ride.create({
       data: {
         passengerId,
@@ -125,7 +147,9 @@ export class RidesService {
         dropoffLng:      data.dropoffLng,
         dropoffAddress:  data.dropoffAddress,
         vehicleType:     vehicleType as any,
-        estimatedPrice,
+        estimatedPrice:  finalEstimated,
+        promoCodeId,
+        discountAmount,
         distanceKm,
         durationMin,
         paymentMethod:   (data.paymentMethod || 'CASH') as any,
@@ -133,6 +157,10 @@ export class RidesService {
         status:          'REQUESTED',
       },
     });
+
+    if (promoCodeId) {
+      await this.promoService.redeem(promoCodeId).catch(() => undefined);
+    }
 
     const radiusKm = await this.platformConfig.getDriverSearchRadiusKm();
     const onlineDrivers = await this.prisma.driverProfile.findMany({

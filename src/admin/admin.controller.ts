@@ -24,6 +24,7 @@ import { MailService } from '../mail/mail.service';
 import { EmailTemplateKey } from '../mail/email-templates.defaults';
 import { AdminFeaturesService } from './admin-features.service';
 import { AuditService } from './audit.service';
+import { SafetyService } from '../safety/safety.service';
 import { AdminRoleGuard } from './admin-role.guard';
 import { AdminWrite, AdminRoles } from './admin-role.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -43,6 +44,7 @@ export class AdminController {
     private readonly mail: MailService,
     private readonly features: AdminFeaturesService,
     private readonly audit: AuditService,
+    private readonly safety: SafetyService,
   ) {}
 
   private actor(req: { user?: { id?: string; email?: string }; ip?: string }) {
@@ -434,16 +436,23 @@ export class AdminController {
     return this.platformConfig.deleteHotZone(id);
   }
 
-  // ─── Panics (stub) ─────────────────────────────────────────────────────────
+  // ─── Panics ────────────────────────────────────────────────────────────────
 
   @Get('panics')
   getPanics() {
-    return [];
+    return this.safety.listPanics(false);
   }
 
   @Get('panics/active')
   getActivePanics() {
-    return [];
+    return this.safety.listPanics(true);
+  }
+
+  @Patch('panics/:id/resolve')
+  @AdminWrite()
+  @HttpCode(HttpStatus.OK)
+  resolvePanic(@Param('id') id: string, @Req() req: { user: { id: string } }, @Body() body: { status?: 'RESOLVED' | 'FALSE_ALARM' }) {
+    return this.safety.resolvePanic(id, req.user.id, body?.status ?? 'RESOLVED');
   }
 
   // ─── Live map ──────────────────────────────────────────────────────────────

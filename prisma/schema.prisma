@@ -151,6 +151,12 @@ enum ParcelSize {
   LARGE
 }
 
+enum PanicStatus {
+  ACTIVE
+  RESOLVED
+  FALSE_ALARM
+}
+
 model User {
   id                 String   @id @default(uuid())
   email              String   @unique
@@ -204,6 +210,8 @@ model User {
   auditLogs          AuditLog[]     @relation("AdminAuditLogs")
   disputesReported   Dispute[]      @relation("DisputeReporter")
   disputesResolved   Dispute[]      @relation("DisputeResolver")
+  panicAlerts        PanicAlert[]   @relation("UserPanics")
+  panicsResolved     PanicAlert[]   @relation("PanicResolver")
 
   @@map("users")
 }
@@ -345,6 +353,9 @@ model Ride {
   vehicleType       VehicleType @default(MOTO)
   estimatedPrice    Float
   finalPrice        Float?
+  promoCodeId       String?
+  promoCode         PromoCode?  @relation(fields: [promoCodeId], references: [id], onDelete: SetNull)
+  discountAmount    Float?
   distanceKm        Float?
   durationMin       Int?
   pinCode           String
@@ -382,6 +393,7 @@ model Ride {
   messages          Message[]
   reviews           Review[]
   disputes          Dispute[]
+  panicAlerts       PanicAlert[]
 
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
@@ -556,9 +568,29 @@ model PromoCode {
   isActive      Boolean           @default(true)
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+  rides         Ride[]
 
   @@index([isActive])
   @@map("promo_codes")
+}
+
+model PanicAlert {
+  id           String      @id @default(uuid())
+  userId       String
+  user         User        @relation("UserPanics", fields: [userId], references: [id], onDelete: Cascade)
+  rideId       String?
+  ride         Ride?       @relation(fields: [rideId], references: [id], onDelete: SetNull)
+  lat          Float?
+  lng          Float?
+  note         String?
+  status       PanicStatus @default(ACTIVE)
+  resolvedAt   DateTime?
+  resolvedById String?
+  resolvedBy   User?       @relation("PanicResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime    @default(now())
+
+  @@index([status, createdAt])
+  @@map("panic_alerts")
 }
 
 model FaqEntry {

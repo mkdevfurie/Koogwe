@@ -10,9 +10,10 @@ import { MailModule } from '../mail/mail.module';
 import { WalletModule } from '../wallet/wallet.module';
 import { CommonModule } from '../common/common.module';
 import { PlatformConfigModule } from '../platform-config/platform-config.module';
+import { SafetyModule } from '../safety/safety.module';
 
 @Module({
-  imports: [PrismaModule, MailModule, WalletModule, CommonModule, PlatformConfigModule],
+  imports: [PrismaModule, MailModule, WalletModule, CommonModule, PlatformConfigModule, SafetyModule],
   controllers: [AdminController],
   providers: [AdminService, AuditService, AdminFeaturesService, AdminRoleGuard],
   exports: [AdminService, AuditService, AdminFeaturesService],

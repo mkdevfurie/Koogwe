@@ -6,7 +6,7 @@ services:
     region: frankfurt
     rootDir: Koogwe_backend
     buildCommand: npm ci && npx prisma generate && npm run build
-    startCommand: npx prisma migrate deploy && npm run start:prod
+    startCommand: chmod +x scripts/render-start.sh && ./scripts/render-start.sh
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
@@ -46,3 +46,5 @@ services:
         sync: false
       - key: FRONTEND_URLS
         sync: false
+      - key: PRISMA_MIGRATE_ADVISORY_LOCK_TIMEOUT
+        value: "120000"

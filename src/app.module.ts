@@ -16,6 +16,8 @@ import { WalletModule } from './wallet/wallet.module';
 import { DocumentsModule } from './documents/documents.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PlatformConfigModule } from './platform-config/platform-config.module';
+import { SafetyModule } from './safety/safety.module';
+import { PromosModule } from './promos/promos.module';
 import { HealthController } from './health/health.controller';
 
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
@@ -60,6 +62,8 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
     WalletModule,
     DocumentsModule,
     NotificationsModule,
+    SafetyModule,
+    PromosModule,
   ],
   providers: [
     // Global Guards

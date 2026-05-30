@@ -6,6 +6,7 @@ import {
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { RidesService } from './rides.service';
 import { AdminService } from '../admin/admin.service';
+import { PromoService } from '../promos/promo.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -66,12 +67,28 @@ export class RidesController {
   constructor(
     private readonly ridesService: RidesService,
     private readonly adminService: AdminService,
+    private readonly promoService: PromoService,
     private readonly prisma: PrismaService,
   ) {}
 
+  @Post('promo/validate')
+  @HttpCode(HttpStatus.OK)
+  async validatePromo(
+    @Request() req: { user: { id: string; role: string } },
+    @Body() body: { code: string; basePrice: number },
+  ) {
+    return this.promoService.validate(
+      body.code,
+      req.user.id,
+      req.user.role as any,
+      Number(body.basePrice),
+    );
+  }
+
   @Post('estimate')
   @HttpCode(HttpStatus.OK)
-  estimatePrice(
+  async estimatePrice(
+    @Request() req: { user: { id: string; role: string } },
     @Body()
     body: {
       distanceKm: number;
@@ -81,16 +98,35 @@ export class RidesController {
       pickupLng?: number;
       dropoffLat?: number;
       dropoffLng?: number;
+      promoCode?: string;
     },
   ) {
     const metrics = resolveTripMetrics(body);
-    return this.adminService.estimatePrice({
+    const result = await this.adminService.estimatePrice({
       distanceKm: metrics.distanceKm,
       durationMin: metrics.durationMin,
       vehicleType: body.vehicleType,
       pickupLat: body.pickupLat,
       pickupLng: body.pickupLng,
     });
+    if (body.promoCode?.trim()) {
+      const promo = await this.promoService.validate(
+        body.promoCode,
+        req.user.id,
+        req.user.role as any,
+        result.estimate,
+      );
+      return {
+        ...result,
+        estimate: promo.finalPrice,
+        promo: {
+          code: promo.code,
+          discountAmount: promo.discountAmount,
+          basePrice: promo.basePrice,
+        },
+      };
+    }
+    return result;
   }
 
   @Post()

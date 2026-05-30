@@ -5,9 +5,10 @@ import { RidesService } from './rides.service';
 import { CommonModule } from '../common/common.module';
 import { AdminModule } from '../admin/admin.module';
 import { WalletModule } from '../wallet/wallet.module';
+import { PromosModule } from '../promos/promos.module';
 
 @Module({
-  imports: [CommonModule, AdminModule, WalletModule],
+  imports: [CommonModule, AdminModule, WalletModule, PromosModule],
   controllers: [RidesController],
   providers: [RidesService],
   exports: [RidesService],
