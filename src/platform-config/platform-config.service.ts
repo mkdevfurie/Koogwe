@@ -16,6 +16,7 @@ export type PricingConfig = {
   pricePerKm: Record<string, number>;
   surgeMultiplier: number;
   currency: string;
+  rules?: PricingRulesConfig;
 };
 
 export type PlatformOpsConfig = {
@@ -26,6 +27,20 @@ export type PlatformOpsConfig = {
   driverAutoApproval: boolean;
   maxDriversOnline: number;
   driverSearchRadiusKm: number;
+  minPassengerAppVersion?: string;
+  minDriverAppVersion?: string;
+  latestPassengerAppVersion?: string;
+  latestDriverAppVersion?: string;
+  forceUpdate?: boolean;
+  inAppMessage?: string;
+};
+
+export type PricingRulesConfig = {
+  nightStartHour: number;
+  nightEndHour: number;
+  nightMultiplier: number;
+  weekendMultiplier: number;
+  peakHours: Array<{ start: number; end: number; multiplier: number }>;
 };
 
 export type PaymentsConfig = {
@@ -74,6 +89,7 @@ export class PlatformConfigService {
       },
       surgeMultiplier: Number(process.env.PRICING_MAX_SURGE ?? 3),
       currency: 'EUR',
+      rules: this.defaultPricingRules(),
     };
   }
 
@@ -86,6 +102,25 @@ export class PlatformConfigService {
       driverAutoApproval: false,
       maxDriversOnline: 500,
       driverSearchRadiusKm: Number(process.env.DRIVER_SEARCH_RADIUS_KM ?? 30),
+      minPassengerAppVersion: '2.2.0',
+      minDriverAppVersion: '2.2.0',
+      latestPassengerAppVersion: '2.2.0',
+      latestDriverAppVersion: '2.2.0',
+      forceUpdate: false,
+      inAppMessage: '',
+    };
+  }
+
+  private defaultPricingRules(): PricingRulesConfig {
+    return {
+      nightStartHour: 22,
+      nightEndHour: 5,
+      nightMultiplier: 1.4,
+      weekendMultiplier: 1.2,
+      peakHours: [
+        { start: 7, end: 9, multiplier: 1.3 },
+        { start: 17, end: 20, multiplier: 1.3 },
+      ],
     };
   }
 
@@ -298,11 +333,38 @@ export class PlatformConfigService {
     return next;
   }
 
+  async getPricingRules(): Promise<PricingRulesConfig> {
+    const pricing = await this.getPricing();
+    return this.merge(this.defaultPricingRules(), pricing.rules);
+  }
+
+  async updatePricingRules(patch: Partial<PricingRulesConfig>) {
+    const pricing = await this.getPricing();
+    const rules = { ...this.defaultPricingRules(), ...pricing.rules, ...patch };
+    return this.updatePricing({ rules });
+  }
+
+  getPublicFaq() {
+    return this.prisma.faqEntry.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+      select: {
+        id: true,
+        questionFr: true,
+        questionEn: true,
+        answerFr: true,
+        answerEn: true,
+        category: true,
+      },
+    });
+  }
+
   async getPublicAppConfig() {
-    const [pricing, payments, platform] = await Promise.all([
+    const [pricing, payments, platform, faq] = await Promise.all([
       this.getPricing(),
       this.getPayments(),
       this.getPlatform(),
+      this.getPublicFaq(),
     ]);
     return {
       maintenanceMode: platform.maintenanceMode,
@@ -313,6 +375,15 @@ export class PlatformConfigService {
         currency: pricing.currency,
         minimumFare: pricing.minimumFare,
       },
+      appVersion: {
+        minPassenger: platform.minPassengerAppVersion,
+        minDriver: platform.minDriverAppVersion,
+        latestPassenger: platform.latestPassengerAppVersion,
+        latestDriver: platform.latestDriverAppVersion,
+        forceUpdate: platform.forceUpdate ?? false,
+      },
+      inAppMessage: platform.inAppMessage ?? '',
+      faq,
     };
   }
 
@@ -349,10 +420,21 @@ export class PlatformConfigService {
       p.pickupFee + params.distanceKm * tarifKm + params.durationMin * p.pricePerMinute;
 
     const hour = new Date().getHours();
+    const day = new Date().getDay();
+    const rules = p.rules ?? this.defaultPricingRules();
+
     let coeffHoraire = 1.0;
-    if (hour >= 7 && hour <= 9) coeffHoraire = 1.3;
-    if (hour >= 17 && hour <= 20) coeffHoraire = 1.3;
-    if (hour >= 22 || hour <= 5) coeffHoraire = 1.4;
+    for (const peak of rules.peakHours ?? []) {
+      if (hour >= peak.start && hour <= peak.end) {
+        coeffHoraire = Math.max(coeffHoraire, peak.multiplier);
+      }
+    }
+    const isNight =
+      hour >= rules.nightStartHour || hour < rules.nightEndHour;
+    if (isNight) coeffHoraire = Math.max(coeffHoraire, rules.nightMultiplier);
+    if (day === 0 || day === 6) {
+      coeffHoraire = Math.max(coeffHoraire, rules.weekendMultiplier);
+    }
 
     const coeffZone: Record<string, number> = {
       normal: 1.0, centre: 1.15, aeroport: 1.3, rural: 0.9,

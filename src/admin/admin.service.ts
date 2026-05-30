@@ -4,7 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { AppGateway } from '../common/websocket.gateway';
 import { PlatformConfigService } from '../platform-config/platform-config.service';
+import { AuditService } from './audit.service';
 import { DocumentStatus, DocumentType } from '@prisma/client';
+
+type AdminActor = { adminId?: string; adminEmail?: string; ip?: string };
 
 // Documents requis pour qu'un chauffeur soit auto-activé après approbation
 const REQUIRED_DRIVER_DOCS: DocumentType[] = [
@@ -23,7 +26,20 @@ export class AdminService {
     private mail: MailService,
     private gateway: AppGateway,
     private platformConfig: PlatformConfigService,
+    private audit: AuditService,
   ) {}
+
+  private async logAction(actor: AdminActor | undefined, action: string, resourceType: string, resourceId?: string, metadata?: Record<string, unknown>) {
+    await this.audit.log({
+      adminId: actor?.adminId,
+      adminEmail: actor?.adminEmail,
+      ip: actor?.ip,
+      action,
+      resourceType,
+      resourceId,
+      metadata,
+    });
+  }
 
   private formatUserDisplayName(user?: {
     firstName?: string | null;
@@ -175,12 +191,13 @@ export class AdminService {
     });
   }
 
-  async suspendDriver(id: string) {
+  async suspendDriver(id: string, actor?: AdminActor) {
     const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
     await this.prisma.driverProfile.update({ where: { id: driver.id }, data: { adminApproved: false } });
     await this.prisma.user.update({ where: { id: driver.userId }, data: { isActive: false, accountStatus: 'SUSPENDED' } });
+    await this.logAction(actor, 'suspend', 'driver', driver.id, { userId: driver.userId });
 
     return { message: 'Chauffeur suspendu' };
   }
@@ -195,7 +212,7 @@ export class AdminService {
     return { message: 'Chauffeur activé' };
   }
 
-  async approveOrRejectDriver(id: string, approved: boolean, adminNotes?: string) {
+  async approveOrRejectDriver(id: string, approved: boolean, adminNotes?: string, actor?: AdminActor) {
     const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
 
@@ -231,6 +248,8 @@ export class AdminService {
     this.logger.log(
       `[Driver] ${driver.userId} ${approved ? '✅ ACTIVÉ' : '❌ REJETÉ'} par admin`,
     );
+
+    await this.logAction(actor, approved ? 'approve' : 'reject', 'driver', driver.id, { adminNotes });
 
     return { message: approved ? 'Dossier approuvé' : 'Dossier rejeté', adminNotes };
   }
@@ -269,6 +288,7 @@ export class AdminService {
     await this.maybeAutoActivateDriver(doc.userId);
     this.emitDocumentUpdated(id, 'APPROVED', doc.userId);
 
+    await this.logAction({ adminId }, 'approve', 'document', id);
     return { message: 'Document approuvé' };
   }
 
@@ -286,6 +306,7 @@ export class AdminService {
       },
     });
     this.emitDocumentUpdated(id, 'REJECTED', doc.userId);
+    await this.logAction({ adminId }, 'reject', 'document', id, { reason });
     return { message: 'Document rejeté', reason };
   }
 
@@ -363,8 +384,18 @@ export class AdminService {
     }));
   }
 
-  async suspendPassenger(id: string) {
-    await this.prisma.user.update({ where: { id }, data: { isActive: false } });
+  async getDocumentQueueStats() {
+    const [pending, approved, rejected] = await Promise.all([
+      this.prisma.document.count({ where: { status: 'PENDING' } }),
+      this.prisma.document.count({ where: { status: 'APPROVED' } }),
+      this.prisma.document.count({ where: { status: 'REJECTED' } }),
+    ]);
+    return { pending, approved, rejected, total: pending + approved + rejected };
+  }
+
+  async suspendPassenger(id: string, actor?: AdminActor) {
+    await this.prisma.user.update({ where: { id }, data: { isActive: false, accountStatus: 'SUSPENDED' } });
+    await this.logAction(actor, 'suspend', 'passenger', id);
     return { message: 'Passager suspendu' };
   }
 
@@ -536,7 +567,7 @@ export class AdminService {
 
   // ─── Suppressions admin ────────────────────────────────────────────────────
 
-  async deleteRide(rideId: string) {
+  async deleteRide(rideId: string, actor?: AdminActor) {
     const ride = await this.prisma.ride.findUnique({ where: { id: rideId } });
     if (!ride) throw new NotFoundException('Course introuvable');
 
@@ -548,10 +579,11 @@ export class AdminService {
       await tx.ride.delete({ where: { id: rideId } });
     });
 
+    await this.logAction(actor, 'delete', 'ride', rideId);
     return { message: 'Course supprimée', id: rideId };
   }
 
-  async deleteRidesByStatus(status: string) {
+  async deleteRidesByStatus(status: string, actor?: AdminActor) {
     const allowed = ['REQUESTED', 'CANCELLED'];
     if (!allowed.includes(status)) {
       throw new BadRequestException(`Suppression groupée autorisée pour: ${allowed.join(', ')}`);
@@ -572,23 +604,27 @@ export class AdminService {
       await tx.ride.deleteMany({ where: { id: { in: ids } } });
     });
 
+    await this.logAction(actor, 'bulk_delete', 'ride', status, { count: ids.length });
     return { message: `${ids.length} course(s) supprimée(s)`, count: ids.length };
   }
 
-  async deletePassenger(userId: string) {
+  async deletePassenger(userId: string, actor?: AdminActor) {
+    await this.logAction(actor, 'delete', 'passenger', userId);
     return this.deleteUserAccount(userId, 'PASSENGER');
   }
 
-  async deleteDriver(id: string) {
+  async deleteDriver(id: string, actor?: AdminActor) {
     const driver = await this.findDriverByIdOrUserId(id);
     if (!driver) throw new NotFoundException('Chauffeur introuvable');
+    await this.logAction(actor, 'delete', 'driver', driver.id, { userId: driver.userId });
     return this.deleteUserAccount(driver.userId, 'DRIVER');
   }
 
-  async deleteDocument(id: string) {
+  async deleteDocument(id: string, actor?: AdminActor) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Document introuvable');
     await this.prisma.document.delete({ where: { id } });
+    await this.logAction(actor, 'delete', 'document', id);
     return { message: 'Document supprimé', id };
   }
 

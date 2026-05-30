@@ -257,6 +257,7 @@ export class AuthService {
         isVerified: true,
         avatarUrl: true,
         hashedPassword: true,
+        adminRole: true,
       },
     });
 
@@ -308,6 +309,7 @@ export class AuthService {
         lastName: user.lastName,
         avatarUrl: user.avatarUrl,
         role: user.role,
+        adminRole: user.adminRole ?? 'SUPER_ADMIN',
       },
     };
   }

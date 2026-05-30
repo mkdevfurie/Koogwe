@@ -22,25 +22,17 @@ import { PlatformConfigService } from '../platform-config/platform-config.servic
 import { MailTemplateService } from '../mail/mail-template.service';
 import { MailService } from '../mail/mail.service';
 import { EmailTemplateKey } from '../mail/email-templates.defaults';
+import { AdminFeaturesService } from './admin-features.service';
+import { AuditService } from './audit.service';
+import { AdminRoleGuard } from './admin-role.guard';
+import { AdminWrite, AdminRoles } from './admin-role.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-
-// Guard qui vérifie que l'utilisateur est bien ADMIN
-import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
-
-@Injectable()
-class AdminGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
-    const { user } = context.switchToHttp().getRequest();
-    if (!user || user.role !== 'ADMIN') {
-      throw new ForbiddenException('Accès réservé aux administrateurs');
-    }
-    return true;
-  }
-}
+import { Response } from 'express';
+import { Res } from '@nestjs/common';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, AdminGuard)
+@UseGuards(JwtAuthGuard, AdminRoleGuard)
 @Controller('admin')
 export class AdminController {
   constructor(
@@ -49,7 +41,17 @@ export class AdminController {
     private readonly platformConfig: PlatformConfigService,
     private readonly mailTemplates: MailTemplateService,
     private readonly mail: MailService,
+    private readonly features: AdminFeaturesService,
+    private readonly audit: AuditService,
   ) {}
+
+  private actor(req: { user?: { id?: string; email?: string }; ip?: string }) {
+    return {
+      adminId: req.user?.id,
+      adminEmail: req.user?.email,
+      ip: req.ip,
+    };
+  }
 
   // ─── Dashboard ─────────────────────────────────────────────────────────────
 
@@ -57,6 +59,11 @@ export class AdminController {
   @ApiOperation({ summary: 'Statistiques globales du dashboard' })
   getDashboardStats() {
     return this.adminService.getDashboardStats();
+  }
+
+  @Get('dashboard/trends')
+  getDashboardTrends() {
+    return this.features.getDashboardTrends();
   }
 
   @Get('dashboard/rides/recent')
@@ -86,10 +93,11 @@ export class AdminController {
   }
 
   @Patch('drivers/:id/suspend')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Suspendre un chauffeur' })
-  suspendDriver(@Param('id') id: string) {
-    return this.adminService.suspendDriver(id);
+  suspendDriver(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.suspendDriver(id, this.actor(req));
   }
 
   @Patch('drivers/:id/activate')
@@ -100,20 +108,23 @@ export class AdminController {
   }
 
   @Patch('drivers/:id/approval')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approuver ou rejeter un dossier chauffeur' })
   approveDriver(
     @Param('id') id: string,
     @Body() body: { approved: boolean; adminNotes?: string },
+    @Req() req: { user: { id: string; email: string }; ip?: string },
   ) {
-    return this.adminService.approveOrRejectDriver(id, body.approved, body.adminNotes);
+    return this.adminService.approveOrRejectDriver(id, body.approved, body.adminNotes, this.actor(req));
   }
 
   @Delete('drivers/:id')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Supprimer un chauffeur et son compte' })
-  deleteDriver(@Param('id') id: string) {
-    return this.adminService.deleteDriver(id);
+  deleteDriver(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.deleteDriver(id, this.actor(req));
   }
 
   // ─── Documents ─────────────────────────────────────────────────────────────
@@ -124,7 +135,13 @@ export class AdminController {
     return this.adminService.getAllDocuments(status);
   }
 
+  @Get('documents/queue-stats')
+  getDocumentQueueStats() {
+    return this.adminService.getDocumentQueueStats();
+  }
+
   @Patch('documents/:id/approve')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approuver un document' })
   approveDocument(@Param('id') id: string, @Req() req: { user: { id: string } }) {
@@ -132,6 +149,7 @@ export class AdminController {
   }
 
   @Patch('documents/:id/reject')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Rejeter un document' })
   rejectDocument(
@@ -143,10 +161,11 @@ export class AdminController {
   }
 
   @Delete('documents/:id')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Supprimer un document' })
-  deleteDocument(@Param('id') id: string) {
-    return this.adminService.deleteDocument(id);
+  deleteDocument(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.deleteDocument(id, this.actor(req));
   }
 
   // ─── Passagers ─────────────────────────────────────────────────────────────
@@ -158,10 +177,11 @@ export class AdminController {
   }
 
   @Patch('passengers/:id/suspend')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Suspendre un passager' })
-  suspendPassenger(@Param('id') id: string) {
-    return this.adminService.suspendPassenger(id);
+  suspendPassenger(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.suspendPassenger(id, this.actor(req));
   }
 
   @Patch('passengers/:id/activate')
@@ -172,10 +192,11 @@ export class AdminController {
   }
 
   @Delete('passengers/:id')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Supprimer un passager et son compte' })
-  deletePassenger(@Param('id') id: string) {
-    return this.adminService.deletePassenger(id);
+  deletePassenger(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.deletePassenger(id, this.actor(req));
   }
 
   // ─── Courses ───────────────────────────────────────────────────────────────
@@ -193,17 +214,19 @@ export class AdminController {
   }
 
   @Delete('rides/bulk')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Supprimer toutes les courses d\'un statut (REQUESTED, CANCELLED)' })
-  deleteRidesBulk(@Query('status') status: string) {
-    return this.adminService.deleteRidesByStatus(status || 'REQUESTED');
+  deleteRidesBulk(@Query('status') status: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.deleteRidesByStatus(status || 'REQUESTED', this.actor(req));
   }
 
   @Delete('rides/:id')
+  @AdminWrite()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Supprimer une course' })
-  deleteRide(@Param('id') id: string) {
-    return this.adminService.deleteRide(id);
+  deleteRide(@Param('id') id: string, @Req() req: { user: { id: string; email: string }; ip?: string }) {
+    return this.adminService.deleteRide(id, this.actor(req));
   }
 
   // ─── Finances ──────────────────────────────────────────────────────────────
@@ -421,5 +444,165 @@ export class AdminController {
   @Get('panics/active')
   getActivePanics() {
     return [];
+  }
+
+  // ─── Live map ──────────────────────────────────────────────────────────────
+
+  @Get('live/map')
+  getLiveMap() {
+    return this.features.getLiveMapData();
+  }
+
+  // ─── Audit log ─────────────────────────────────────────────────────────────
+
+  @Get('audit-logs')
+  getAuditLogs(@Query('limit') limit?: string, @Query('offset') offset?: string, @Query('resourceType') resourceType?: string) {
+    return this.audit.list(Number(limit) || 100, Number(offset) || 0, resourceType);
+  }
+
+  // ─── Notifications push ────────────────────────────────────────────────────
+
+  @Post('notifications/broadcast')
+  @AdminWrite()
+  @HttpCode(HttpStatus.OK)
+  broadcast(@Body() body: { title: string; body: string; target: 'ALL' | 'PASSENGER' | 'DRIVER' }) {
+    return this.features.broadcastNotification(body);
+  }
+
+  // ─── Litiges ───────────────────────────────────────────────────────────────
+
+  @Get('disputes')
+  listDisputes(@Query('status') status?: string) {
+    return this.features.listDisputes(status as any);
+  }
+
+  @Post('disputes')
+  @AdminWrite()
+  createDispute(@Body() body: { rideId?: string; reporterId?: string; reason: string; rating?: number }) {
+    return this.features.createDispute(body);
+  }
+
+  @Patch('disputes/:id')
+  @AdminWrite()
+  updateDispute(@Param('id') id: string, @Body() body: Record<string, unknown>, @Req() req: { user: { id: string } }) {
+    return this.features.updateDispute(id, {
+      ...body,
+      resolvedById: body.status === 'RESOLVED' || body.status === 'REFUNDED' ? req.user.id : undefined,
+    } as any);
+  }
+
+  @Post('disputes/scan-low-ratings')
+  @AdminWrite()
+  scanLowRatings() {
+    return this.features.scanLowRatingDisputes();
+  }
+
+  // ─── Promos ────────────────────────────────────────────────────────────────
+
+  @Get('promos')
+  listPromos() {
+    return this.features.listPromos();
+  }
+
+  @Post('promos')
+  @AdminWrite()
+  createPromo(@Body() body: Record<string, unknown>) {
+    return this.features.createPromo(body as any);
+  }
+
+  @Patch('promos/:id')
+  @AdminWrite()
+  updatePromo(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.features.updatePromo(id, body);
+  }
+
+  @Delete('promos/:id')
+  @AdminWrite()
+  deletePromo(@Param('id') id: string) {
+    return this.features.deletePromo(id);
+  }
+
+  // ─── FAQ ───────────────────────────────────────────────────────────────────
+
+  @Get('faq')
+  listFaq() {
+    return this.features.listFaq();
+  }
+
+  @Post('faq')
+  @AdminWrite()
+  createFaq(@Body() body: Record<string, unknown>) {
+    return this.features.createFaq(body as any);
+  }
+
+  @Patch('faq/:id')
+  @AdminWrite()
+  updateFaq(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    return this.features.updateFaq(id, body);
+  }
+
+  @Delete('faq/:id')
+  @AdminWrite()
+  deleteFaq(@Param('id') id: string) {
+    return this.features.deleteFaq(id);
+  }
+
+  // ─── Exports ─────────────────────────────────────────────────────────────
+
+  @Get('export/rides')
+  async exportRides(@Query('from') from: string, @Query('to') to: string, @Res() res: Response) {
+    const csv = await this.features.exportRidesCsv(from, to);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="courses.csv"');
+    res.send('\uFEFF' + csv);
+  }
+
+  @Get('export/drivers')
+  async exportDrivers(@Res() res: Response) {
+    const csv = await this.features.exportDriversCsv();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="chauffeurs.csv"');
+    res.send('\uFEFF' + csv);
+  }
+
+  @Get('export/revenue')
+  async exportRevenue(@Query('from') from: string, @Query('to') to: string, @Res() res: Response) {
+    const csv = await this.features.exportRevenueCsv(from, to);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="revenus.csv"');
+    res.send('\uFEFF' + csv);
+  }
+
+  // ─── Health ────────────────────────────────────────────────────────────────
+
+  @Get('health/detailed')
+  getDetailedHealth() {
+    return this.features.getDetailedHealth();
+  }
+
+  // ─── Rôles admin ───────────────────────────────────────────────────────────
+
+  @Get('admins')
+  @AdminRoles('SUPER_ADMIN')
+  listAdmins() {
+    return this.features.listAdminUsers();
+  }
+
+  @Patch('admins/:id/role')
+  @AdminWrite()
+  @AdminRoles('SUPER_ADMIN')
+  updateAdminRole(@Param('id') id: string, @Body() body: { adminRole: 'SUPER_ADMIN' | 'SUPPORT' | 'READONLY' }) {
+    return this.features.updateAdminRole(id, body.adminRole);
+  }
+
+  @Get('config/pricing-rules')
+  getPricingRules() {
+    return this.platformConfig.getPricingRules();
+  }
+
+  @Patch('config/pricing-rules')
+  @AdminWrite()
+  updatePricingRules(@Body() body: Record<string, unknown>) {
+    return this.platformConfig.updatePricingRules(body);
   }
 }

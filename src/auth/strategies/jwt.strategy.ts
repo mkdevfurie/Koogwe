@@ -21,7 +21,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       select: {
         id: true, email: true, firstName: true, lastName: true,
         role: true, isActive: true, isVerified: true, language: true,
-        accountStatus: true,
+        accountStatus: true, adminRole: true,
         driverProfile: {
           select: {
             id: true, isOnline: true, adminApproved: true,
