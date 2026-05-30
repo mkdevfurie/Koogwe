@@ -469,6 +469,24 @@ export class AdminController {
     return this.features.broadcastNotification(body);
   }
 
+  @Get('notifications/users')
+  searchNotificationUsers(
+    @Query('q') q: string,
+    @Query('role') role?: 'PASSENGER' | 'DRIVER',
+  ) {
+    return this.features.searchNotificationTargets(q, role);
+  }
+
+  @Post('notifications/send')
+  @AdminWrite()
+  @HttpCode(HttpStatus.OK)
+  sendToUser(@Body() body: { userId: string; title: string; body: string }) {
+    if (!body?.userId || !body?.title?.trim() || !body?.body?.trim()) {
+      throw new BadRequestException('userId, title et body requis');
+    }
+    return this.features.sendNotificationToUser(body);
+  }
+
   // ─── Litiges ───────────────────────────────────────────────────────────────
 
   @Get('disputes')

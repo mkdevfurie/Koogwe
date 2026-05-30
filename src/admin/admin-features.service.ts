@@ -156,6 +156,68 @@ export class AdminFeaturesService {
     return { sent, target: params.target };
   }
 
+  async searchNotificationTargets(q: string, role?: UserRole) {
+    const term = q?.trim()
+    if (!term || term.length < 2) return []
+
+    const where: Prisma.UserWhereInput = {
+      role: role ?? { in: ['PASSENGER', 'DRIVER'] },
+      isActive: true,
+      OR: [
+        { email: { contains: term, mode: 'insensitive' } },
+        { firstName: { contains: term, mode: 'insensitive' } },
+        { lastName: { contains: term, mode: 'insensitive' } },
+        { phone: { contains: term } },
+      ],
+    }
+
+    return this.prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        fcmToken: true,
+        notifPushEnabled: true,
+      },
+      orderBy: { email: 'asc' },
+      take: 25,
+    })
+  }
+
+  async sendNotificationToUser(params: {
+    userId: string
+    title: string
+    body: string
+    type?: NotificationType
+  }) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: params.userId },
+      select: { id: true, role: true, email: true, fcmToken: true, notifPushEnabled: true },
+    })
+    if (!user || (user.role !== 'PASSENGER' && user.role !== 'DRIVER')) {
+      throw new NotFoundException('Utilisateur introuvable')
+    }
+
+    await this.notifications.notify({
+      userId: user.id,
+      type: params.type ?? 'ADMIN_ACTION',
+      title: params.title,
+      body: params.body,
+      data: { fromAdmin: true },
+    })
+
+    return {
+      success: true,
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      pushAvailable: Boolean(user.fcmToken && user.notifPushEnabled !== false),
+    }
+  }
+
   // ─── Disputes ─────────────────────────────────────────────────────────────
 
   listDisputes(status?: DisputeStatus) {
